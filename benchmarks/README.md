@@ -1,143 +1,188 @@
 # MolmoAct2 on Franka Emika — Benchmark
 
-End-to-end harness for evaluating **MolmoAct2** (served on an A100 HPC node)
-driving a **Franka Research** robot through the REST motion server from
-[`roatienza/autonomous-robots/franka`](https://github.com/roatienza/autonomous-robots/tree/main/franka).
+End-to-end harness for evaluating **MolmoAct2** on a Franka Research robot.
+Two evaluation paths share a common metrics schema (`benchmark/metrics.py`):
 
-## Metrics collected
+| Path | Model | Where it runs | Auto-scored? | Purpose |
+|---|---|---|---|---|
+| **LIBERO sim** (`scripts/run_libero_benchmark.py`) | `allenai/MolmoAct2-LIBERO` | one Python process on the HPC GPU (in-process, no HTTP) | yes (`env.check_success()`) | **Primary**: get suite-wide success numbers fast, no robot |
+| **DROID real-robot** (`scripts/run_droid_benchmark.py`) | `allenai/MolmoAct2-DROID` | upstream `host_server_droid.py` on HPC + tunnel + workstation client | no (human grader) | Table 6 reproduction once sim is validated |
 
-- **Task success rate** — LIBERO-style subset (4 spatial + 2 goal tasks), human-scored per trial.
-- **Inference latency** — GPU/processor time reported by the server (`infer_server_ms`) and full HTTP RTT (`infer_rtt_ms`).
-- **End-to-end control latency** — camera grab → MolmoAct2 → Franka REST return (`e2e_ms`).
-- Per-step record of camera/infer/motion timings dumped as JSON in `results/`.
+Current focus: **LIBERO sim first**, real robot later.
 
-## Topology
+## Sim path (LIBERO + MolmoAct2-LIBERO)
 
 ```
-RealSense D457 ──► workstation ──► ssh -L 8000 ──► HPC A100
-                       │                              │
-                       │                              serve_molmoact2.py
-                       │                              (FastAPI + transformers)
-                       ▼
-              franka motion_server (192.168.2.1:34568)
-                       │
-                       ▼
-                 Franka Emika
+HPC A100 (one Python process)
+  ├── allenai/MolmoAct2-LIBERO  (loaded in-process via transformers)
+  └── robosuite/MuJoCo Franka   (LIBERO env, agentview + wrist cameras)
+        ↑                          │
+        └── env.step(action[7]) ◄──┘  predict_action -> actions[N,7]
 ```
+
+### HPC setup
+
+```bash
+# clone + LIBERO + sim deps + model deps -- all in one env
+cd ~
+git clone https://github.com/Lifelong-Robot-Learning/LIBERO.git
+git clone https://github.com/erwinquilloy/mex5.git
+
+# use the upstream MolmoAct2 venv (uv-managed, has the right transformers pin)
+# OR: a fresh conda env -- avoid mixing with the broken `cached_path` env from earlier
+conda create -n molmoact2-libero python=3.10 -y && conda activate molmoact2-libero
+pip install -U "transformers>=4.46" "huggingface_hub>=0.24" "accelerate>=0.34" torch
+pip install -r ~/mex5/benchmarks/requirements.txt
+pip install -r ~/mex5/benchmarks/requirements_sim.txt
+pip install -e ~/LIBERO
+
+export MUJOCO_GL=egl
+export HF_HOME=$HOME/hf-cache
+mkdir -p $HF_HOME
+```
+
+### Run on the HPC GPU
+
+```bash
+cd ~/mex5
+
+# list tasks in a suite (no model load -- fast)
+python -m benchmarks.scripts.run_libero_benchmark --list libero_spatial
+
+# smoke test: one task, one trial -- validates model + env wire end-to-end
+python -m benchmarks.scripts.run_libero_benchmark \
+    --suite libero_spatial --tasks 0 --trials 1
+
+# full libero_spatial suite (10 tasks x 5 trials)
+python -m benchmarks.scripts.run_libero_benchmark --suite libero_spatial --trials 5
+
+# all four "main" LIBERO suites, 5 trials each
+for s in libero_spatial libero_object libero_goal libero_10; do
+  python -m benchmarks.scripts.run_libero_benchmark --suite $s --trials 5
+done
+```
+
+Results stream into `benchmarks/results/<run_id>.json` after every trial. The
+final stdout block prints overall success rate, per-task success rate, and
+inference / e2e latency p50/p95/p99 — directly comparable to the DROID real-robot
+numbers later.
+
+## Topology (DROID path)
+
+```
+RealSense D457 (wrist) ──┐
+USB webcam (external) ───┴► workstation ──► ssh -L 8000 ──► HPC A100
+                              │                                 │
+                              │                  uv run host_server_droid.py
+                              │                                 │
+                              ▼                                 │
+                       panda_py ──► libfranka ──► Franka  ◄─────┘  (actions[N,8])
+```
+
+Action contract (from the model card): `actions[N, 8]` = `[q1..q7, gripper]`,
+**absolute joint targets in radians + gripper command**. Gripper ≥ 0.5 ⇒ close.
+
+## Reproducibility caveats vs. Table 6
+
+- **Single external camera**: Table 6's protocol randomizes the external camera pose
+  each trial. We use whatever you mount as `FRANKA_BENCH_EXT_INDEX`. If no
+  external is set, `dual_camera.py` falls back to duplicating the wrist image
+  (substantially OOD for the model — expect a large gap from the paper numbers).
+- **OOD objects**: bring objects that the model has not seen in DROID training.
+  Common household items work; avoid anything that looks like the demo videos.
+- **Controller**: paper uses the DROID NUC + polymetis stack; we use `panda_py`
+  directly. Same action space, different timing characteristics.
 
 ## Setup
 
-**On the HPC node (`ai-n002.hpc.coe.upd.edu.ph`):**
+### 1. HPC (model server)
 
+See `benchmarks/hpc/README.md`. TL;DR on the HPC node:
 ```bash
-conda create -n molmoact2 python=3.10 -y && conda activate molmoact2
-pip install -r benchmarks/hpc/requirements_hpc.txt
-# pick the actual HF id of MolmoAct2 (defaults to allenai/MolmoAct-2-7B)
-MOLMOACT2_MODEL=allenai/MolmoAct-2-7B python benchmarks/hpc/serve_molmoact2.py --port 8000
+git clone https://github.com/allenai/molmoact2.git ~/molmoact2 && cd ~/molmoact2
+uv sync && uv run hf download allenai/MolmoAct2-DROID
+uv run python examples/droid/host_server_droid.py --host 0.0.0.0 --port 8000 --dtype bfloat16
 ```
 
-**On the workstation:**
+### 2. Workstation (controls Franka, runs the eval client)
 
 ```bash
 pip install -r benchmarks/requirements.txt
-# tunnel the server
-bash benchmarks/hpc/launch_server.sh tunnel
-# in another shell -- start the Franka motion server per franka/README.md, then:
-python -m benchmarks.scripts.run_benchmark --trials 5
+ssh -N -L 8000:localhost:8000 erwin.quilloy@ai-n002.hpc.coe.upd.edu.ph &
+curl http://localhost:8000/act    # confirm: {"status": "ok", "repo_id": "...", ...}
 ```
 
-## Action contract
+Workspace prep:
+- Wrist D457 mounted, USB-C / FAKRA switch set per `franka/README.md`.
+- External USB webcam plugged in. Find its index with `ls /dev/video*` (use the
+  number after `video`, e.g. `/dev/video0` → `0`).
+- Franka in white/unlocked state, FCI activated (see `franka/python/basic.py`).
 
-MolmoAct2 returns a 7-vector per step: `[dx, dy, dz, droll, dpitch, dyaw, grip]`
-in **meters / degrees**, where `grip > 0.5` ⇒ close. The Franka REST API
-already accepts cartesian targets + delta-degree rotations (see
-`franka/README.md`), so `FrankaClient.apply_delta` adds the position deltas to
-the current pose, forwards rotation deltas verbatim, and toggles the gripper
-before commanding the motion.
-
-If the upstream model uses a different convention, override
-`FrankaClient.apply_delta` rather than changing the network code.
-
-## Files
-
-| Path | Purpose |
-|---|---|
-| `hpc/serve_molmoact2.py` | FastAPI predict server (runs on A100) |
-| `hpc/launch_server.sh` | SSH tunnel + remote launch helpers |
-| `benchmark/franka_client.py` | REST wrapper with timing hooks |
-| `benchmark/molmoact_client.py` | HTTP client → MolmoAct2 server |
-| `benchmark/camera.py` | RealSense D457 + file-replay fallback |
-| `benchmark/libero_env.py` | LIBERO sim env wrapper (robosuite/MuJoCo) |
-| `benchmark/tasks.py` | Real-robot task definitions (LIBERO-style) |
-| `benchmark/metrics.py` | Latency timers, record dataclasses, summary |
-| `benchmark/runner.py` | Real-robot capture→infer→execute loop |
-| `benchmark/sim_runner.py` | LIBERO sim infer→step loop |
-| `scripts/run_benchmark.py` | CLI: real-robot run |
-| `scripts/run_libero_benchmark.py` | CLI: LIBERO sim run |
-| `results/` | Per-run JSON dumps |
-
-## Sim path (LIBERO)
-
-LIBERO ships task suites (`libero_spatial`, `libero_object`, `libero_goal`,
-`libero_10`, `libero_90`) with a Franka Panda in robosuite/MuJoCo, language
-instructions per task, and built-in `check_success()` — so we get automated
-scoring without the real robot or a human grader.
-
-### Install
+### 3. Run
 
 ```bash
-# 1. base benchmark deps
-pip install -r benchmarks/requirements.txt
+export FRANKA_HOST=192.168.1.131
+export FRANKA_USER=...
+export FRANKA_PASS=...
+export FRANKA_BENCH_EXT_INDEX=0          # /dev/video0
+# optional: FRANKA_BENCH_WRIST_SERIAL=<D457 serial>  to pin the wrist cam
 
-# 2. sim deps + LIBERO from source (the package isn't on PyPI)
-pip install -r benchmarks/requirements_sim.txt
-git clone https://github.com/Lifelong-Robot-Learning/LIBERO.git ~/LIBERO
-pip install -e ~/LIBERO
-# LIBERO downloads BDDL/task assets on first env construction;
-# headless mujoco needs MUJOCO_GL=egl (Linux) or osmesa.
-export MUJOCO_GL=egl
+# full Table 6 (5 tasks x 15 trials, ~hours)
+python -m benchmarks.scripts.run_droid_benchmark
+
+# single task, one trial -- smoke test the whole loop end-to-end
+python -m benchmarks.scripts.run_droid_benchmark --tasks apple_on_plate --trials 1
 ```
 
-### Run
+The runner prompts you per-trial to set up the scene + randomize the external
+camera, then asks for the success grade after each trial. Results stream to
+`benchmarks/results/<run_id>.json` after every trial (crash-safe). At the end
+it prints a side-by-side with the paper:
 
-```bash
-# list tasks in a suite
-python -m benchmarks.scripts.run_libero_benchmark --list libero_spatial
-
-# full libero_spatial suite (10 tasks), 5 trials each, MolmoAct2 over tunnel
-python -m benchmarks.scripts.run_libero_benchmark \
-    --suite libero_spatial --trials 5 \
-    --molmoact-url http://localhost:8000
-
-# single task, larger action chunk
-python -m benchmarks.scripts.run_libero_benchmark \
-    --suite libero_goal --tasks 0 --trials 3 --n-action-chunk 4
+```
+===== Table 6 comparison (MolmoAct2-DROID) =====
+task                            paper     ours    n
+apple_on_plate                  100.0%    93.3%   15
+pipette_in_tray                  86.7%    66.7%   15
+...
 ```
 
-### Action scaling note
+## Layout
 
-LIBERO's OSC_POSE controller expects actions in `[-1, 1]`. MolmoAct2 may emit
-raw meters/degrees + binary grip. Tune `--action-scale` so the first six dims
-land in that range; the gripper is remapped automatically (`>0.5` ⇒ close).
-If the model is already trained on LIBERO/OXE-normalized actions, leave
-`--action-scale 1.0`.
-
-## Dry-run (no robot, no GPU)
-
-```bash
-# point at any folder of jpegs; success prompt suppressed
-FRANKA_BENCH_IMAGES=./fixtures \
-  python -m benchmarks.scripts.run_benchmark \
-    --tasks spatial_red_left --trials 1 \
-    --molmoact-url http://localhost:8000 \
-    --no-interactive
+```
+benchmarks/
+  README.md                            this file
+  requirements.txt                     workstation deps
+  hpc/README.md                        HPC server setup (upstream host_server_droid.py)
+  benchmark/
+    dual_camera.py                     wrist (RealSense) + external (UVC) capture
+    panda_driver.py                    panda_py wrapper: state -> 8-vec, send action chunk
+    molmoact_droid_client.py           POST /act with json_numpy
+    droid_tasks.py                     Table 6 task suite (5 tasks, paper success rates)
+    droid_runner.py                    capture -> infer -> joint exec loop
+    metrics.py                         per-step record + p50/p95/p99 summaries
+    libero_env.py                      LIBERO sim env (smoke-test path)
+    sim_runner.py                      LIBERO loop
+    molmoact_client.py                 (legacy /predict client; LIBERO path only)
+    franka_client.py                   (legacy REST cartesian client; unused for DROID path)
+    camera.py                          (legacy single-camera; unused for DROID path)
+    tasks.py                           (legacy LIBERO-style real-robot tasks)
+    runner.py                          (legacy real-robot runner using motion_server)
+  scripts/
+    run_droid_benchmark.py             PRIMARY: Table 6 zero-shot eval
+    run_libero_benchmark.py            sim smoke test
+    run_benchmark.py                   legacy
+  results/                             per-run JSON dumps
 ```
 
-This still requires a reachable MolmoAct2 endpoint (mock it with a FastAPI
-stub that returns zeros if you just want to exercise the loop).
+## What the legacy files are
 
-## Tunables worth sweeping
+The first version of this harness assumed a custom inference server we'd write
+(`benchmark/molmoact_client.py`, `serve_molmoact2.py`) and a cartesian REST
+action interface (`benchmark/franka_client.py`). After reading the MolmoAct2
+model card and Allen AI's repo, we pivoted to:
+- upstream `host_server_droid.py` for serving (correct schema, json_numpy)
+- `panda_py` for action exec (DROID uses joint targets, not cartesian)
 
-- `--n-action-chunk` — actions returned per inference; trades fewer GPU calls for more open-loop drift.
-- `--step-time` — commanded motion duration per cartesian step (REST `t` field).
-- Image resolution in `camera.RealsenseCamera(...)` — affects both inference latency and policy quality.
+The legacy modules are retained because the LIBERO sim path may still use them
+in future work, and they document the API of the underlying C++ motion server.

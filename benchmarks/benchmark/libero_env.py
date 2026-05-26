@@ -1,16 +1,14 @@
-"""LIBERO sim env wrapper.
+"""LIBERO sim env wrapper, tuned to MolmoAct2-LIBERO's input contract.
 
-LIBERO ships task suites (libero_spatial, libero_object, libero_goal, libero_10,
-libero_90) backed by robosuite/MuJoCo with a Franka Panda. Each task carries an
-initial-state set and a built-in `check_success()`, so we get automated success
-scoring without a human in the loop.
+MolmoAct2-LIBERO expects:
+  - images: [agentview_rgb, wrist_rgb]            (PIL or HxWx3 uint8)
+  - state:  float32(8,) = [eef_xyz(3), eef_axis_angle(3), gripper_qpos(2)]
+  - actions returned: LIBERO-scale (already denormalized) -- pass straight to env.step
 
-This wrapper:
-  - resolves a task by (suite, task_index) and returns its language instruction
-  - constructs an OffScreenRenderEnv (RGB only, no GUI)
-  - exposes reset(init_idx), step(action), render() -> PIL.Image, success()
-
-Install (see README): `pip install -e .` of LIBERO with robosuite + mujoco.
+LIBERO ships task suites (libero_spatial, libero_object, libero_goal,
+libero_10, libero_90) backed by robosuite/MuJoCo with a Franka Panda. Each
+task carries an initial-state set and a built-in `check_success()`, so we get
+automated success scoring without a human in the loop.
 """
 from __future__ import annotations
 
@@ -19,10 +17,11 @@ from dataclasses import dataclass
 from typing import Optional
 
 import numpy as np
-from PIL import Image
 
 
 SUITES = ("libero_spatial", "libero_object", "libero_goal", "libero_10", "libero_90")
+AGENT_CAM = "agentview"
+WRIST_CAM = "robot0_eye_in_hand"
 
 
 @dataclass
@@ -35,8 +34,28 @@ class LiberoTaskSpec:
     n_init_states: int
 
 
+@dataclass
+class LiberoObs:
+    agentview: np.ndarray   # (H, W, 3) uint8 RGB
+    wrist:     np.ndarray   # (H, W, 3) uint8 RGB
+    state8:    np.ndarray   # (8,) float32, MolmoAct2-LIBERO state convention
+
+
+def _quat_to_axis_angle(quat_xyzw: np.ndarray) -> np.ndarray:
+    """robosuite returns quaternions in (x, y, z, w) order. Return a 3-vector
+    whose direction is the rotation axis and magnitude is the rotation angle."""
+    q = np.asarray(quat_xyzw, dtype=np.float64)
+    q = q / max(np.linalg.norm(q), 1e-12)
+    x, y, z, w = q
+    angle = 2.0 * np.arccos(np.clip(w, -1.0, 1.0))
+    s = np.sqrt(max(1.0 - w * w, 0.0))
+    if s < 1e-8:
+        return np.zeros(3, dtype=np.float32)
+    return np.array([x / s, y / s, z / s], dtype=np.float32) * float(angle)
+
+
 class LiberoEnv:
-    """Single-task sim env, RGB-only obs, 7-DoF delta-pose + grip action."""
+    """Dual-camera LIBERO env (agentview + wrist) for MolmoAct2-LIBERO."""
 
     def __init__(
         self,
@@ -44,7 +63,6 @@ class LiberoEnv:
         task_index: int,
         camera_height: int = 256,
         camera_width: int = 256,
-        camera_name: str = "agentview",
     ):
         if suite not in SUITES:
             raise ValueError(f"suite must be one of {SUITES}, got {suite!r}")
@@ -70,18 +88,17 @@ class LiberoEnv:
             n_init_states=len(init_states),
         )
         self._init_states = init_states
-        self._camera = camera_name
         self._env = OffScreenRenderEnv(
             bddl_file_name=bddl,
             camera_heights=camera_height,
             camera_widths=camera_width,
-            camera_names=[camera_name],
+            camera_names=[AGENT_CAM, WRIST_CAM],
         )
         self._last_obs: dict | None = None
 
     # ----- lifecycle -----
 
-    def reset(self, init_index: int = 0, seed: Optional[int] = None) -> Image.Image:
+    def reset(self, init_index: int = 0, seed: Optional[int] = None) -> LiberoObs:
         if seed is not None:
             self._env.seed(seed)
         self._env.reset()
@@ -90,36 +107,36 @@ class LiberoEnv:
         for _ in range(5):
             obs, _, _, _ = self._env.step(np.zeros(7, dtype=np.float32))
         self._last_obs = obs
-        return self.render()
+        return self.observe()
 
-    def step(self, action) -> tuple[Image.Image, float, bool, dict]:
+    def step(self, action) -> tuple[LiberoObs, float, bool, dict]:
         a = np.asarray(action, dtype=np.float32).reshape(-1)
         if a.shape[0] != 7:
             raise ValueError(f"action must be 7-dim, got {a.shape}")
         obs, reward, done, info = self._env.step(a)
         self._last_obs = obs
-        return self.render(), float(reward), bool(done), dict(info)
+        return self.observe(), float(reward), bool(done), dict(info)
 
-    def render(self) -> Image.Image:
-        key = f"{self._camera}_image"
-        img = self._last_obs[key]
+    def observe(self) -> LiberoObs:
+        obs = self._last_obs or {}
         # robosuite returns frames upside-down relative to the OpenGL convention.
-        return Image.fromarray(np.ascontiguousarray(img[::-1]), mode="RGB")
+        agent = np.ascontiguousarray(obs[f"{AGENT_CAM}_image"][::-1])
+        wrist = np.ascontiguousarray(obs[f"{WRIST_CAM}_image"][::-1])
+        eef_pos = np.asarray(obs.get("robot0_eef_pos", np.zeros(3)), dtype=np.float32)
+        eef_quat = np.asarray(obs.get("robot0_eef_quat", np.array([0, 0, 0, 1])), dtype=np.float32)
+        grip_qpos = np.asarray(obs.get("robot0_gripper_qpos", np.zeros(2)), dtype=np.float32)
+        state8 = np.concatenate(
+            [eef_pos, _quat_to_axis_angle(eef_quat), grip_qpos]
+        ).astype(np.float32)
+        if state8.shape[0] != 8:
+            raise RuntimeError(f"state8 wrong shape: {state8.shape}")
+        return LiberoObs(agentview=agent, wrist=wrist, state8=state8)
 
     def success(self) -> bool:
         try:
             return bool(self._env.check_success())
         except Exception:
             return False
-
-    def proprio(self) -> Optional[list[float]]:
-        if self._last_obs is None:
-            return None
-        # Try common robosuite key names; return None if unavailable.
-        for k in ("robot0_eef_pos", "robot0_proprio-state"):
-            if k in self._last_obs:
-                return np.asarray(self._last_obs[k], dtype=np.float32).tolist()
-        return None
 
     def close(self) -> None:
         try:

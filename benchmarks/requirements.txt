@@ -1,4 +1,7 @@
 requests
 numpy
 pillow
-pyrealsense2 ; sys_platform != "darwin"
+json-numpy
+opencv-python
+pyrealsense2 ; sys_platform == "linux"
+panda-python ; sys_platform == "linux"

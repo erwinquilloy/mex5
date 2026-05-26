@@ -1,4 +1,4 @@
-"""LIBERO sim loop: MolmoAct2 -> action -> env.step -> auto success check."""
+"""LIBERO sim loop with in-process MolmoAct2-LIBERO."""
 from __future__ import annotations
 
 import logging
@@ -6,75 +6,59 @@ import time
 import uuid
 from typing import Optional
 
-import numpy as np
-
-from .libero_env import LiberoEnv, SUITES, list_suite_tasks
+from .libero_env import LiberoEnv, LiberoObs, SUITES, list_suite_tasks
 from .metrics import RunRecord, StepRecord, Stopwatch, TrialRecord
-from .molmoact_client import MolmoActClient
+from .molmoact_libero_local import MolmoActLiberoLocal
 
 log = logging.getLogger("bench.sim")
-
-
-def _scale_action(a, action_scale: float, clip: float) -> np.ndarray:
-    """LIBERO/robosuite OSC_POSE action lives in [-1, 1]; MolmoAct2 may emit
-    raw meters/degrees + gripper {0,1}. We scale the first 6 dims and remap
-    the gripper. Tune `action_scale` per model. Set to 1.0 if model already
-    outputs in [-1, 1]."""
-    a = np.asarray(a, dtype=np.float32).reshape(-1)
-    if a.shape[0] != 7:
-        raise ValueError(f"expected 7-dim action, got {a.shape}")
-    out = np.empty(7, dtype=np.float32)
-    out[:6] = np.clip(a[:6] * action_scale, -clip, clip)
-    out[6] = 1.0 if a[6] > 0.5 else -1.0   # robosuite: +1=close, -1=open
-    return out
 
 
 def run_trial(
     env: LiberoEnv,
     trial: int,
     init_index: int,
-    molmo: MolmoActClient,
+    molmo: MolmoActLiberoLocal,
     max_steps: int,
-    n_action_chunk: int,
-    action_scale: float,
-    action_clip: float,
+    num_steps: int,
     seed: Optional[int] = None,
 ) -> TrialRecord:
     molmo.reset()
-    img = env.reset(init_index=init_index, seed=seed)
+    obs: LiberoObs = env.reset(init_index=init_index, seed=seed)
     rec = TrialRecord(task_id=env.spec.task_id, trial=trial, success=False, n_steps=0, wallclock_s=0.0)
     t_start = time.perf_counter()
-    cam_sw, step_sw = Stopwatch(), Stopwatch()
+    step_sw = Stopwatch()
     success = False
+    done = False
 
-    for _ in range(max_steps):
+    while len(rec.steps) < max_steps and not (success or done):
         e2e_t0 = time.perf_counter()
-        with cam_sw():
-            _ = img  # already in hand from previous step/reset; "grab" is just the reference
-        pred = molmo.predict(img, env.spec.instruction, state=env.proprio(),
-                             n_actions=n_action_chunk)
+        pred = molmo.act(
+            agentview=obs.agentview,
+            wrist=obs.wrist,
+            instruction=env.spec.instruction,
+            state8=obs.state8,
+            num_steps=num_steps,
+        )
+        # Execute every action in the returned chunk before re-querying the model.
         for a in pred.actions:
-            a_env = _scale_action(a, action_scale, action_clip)
             with step_sw():
-                img, _reward, done, _info = env.step(a_env)
+                obs, _reward, done, _info = env.step(a)
             success = env.success()
             e2e_ms = (time.perf_counter() - e2e_t0) * 1000.0
             rec.steps.append(StepRecord(
                 step=len(rec.steps),
-                camera_ms=cam_sw.ms,
+                camera_ms=0.0,          # in-sim render is bundled into env.step
                 infer_server_ms=pred.server_dt_ms,
                 infer_rtt_ms=pred.rtt_ms,
-                motion_rest_ms=step_sw.ms,    # sim "rest" time = env.step wallclock
-                motion_cmd_ms=0.0,            # no commanded duration in sim
+                motion_rest_ms=step_sw.ms,
+                motion_cmd_ms=0.0,
                 e2e_ms=e2e_ms,
-                action=list(map(float, a)),
+                action=[float(x) for x in a],
                 instruction=env.spec.instruction,
             ))
-            if success or done:
+            if success or done or len(rec.steps) >= max_steps:
                 break
             e2e_t0 = time.perf_counter()
-        if success or done:
-            break
 
     rec.n_steps = len(rec.steps)
     rec.wallclock_s = time.perf_counter() - t_start
@@ -86,22 +70,22 @@ def run_libero_benchmark(
     suite: str = "libero_spatial",
     task_indices: Optional[list[int]] = None,
     trials_per_task: int = 5,
-    molmoact_url: str = "http://localhost:8000",
-    n_action_chunk: int = 1,
+    model_id: str = "allenai/MolmoAct2-LIBERO",
+    dtype: str = "bf16",
+    num_steps: int = 10,
     max_steps: int = 300,
-    action_scale: float = 1.0,
-    action_clip: float = 1.0,
     camera_height: int = 256,
     camera_width: int = 256,
+    enable_cuda_graph: bool = True,
     seed: int = 0,
     results_dir: str = "benchmarks/results",
 ) -> RunRecord:
     if suite not in SUITES:
         raise ValueError(f"suite must be one of {SUITES}")
 
-    molmo = MolmoActClient(molmoact_url)
-    health = molmo.health()
-    log.info("molmoact health: %s", health)
+    log.info("loading model %s (dtype=%s)", model_id, dtype)
+    molmo = MolmoActLiberoLocal(model_id=model_id, dtype=dtype, enable_cuda_graph=enable_cuda_graph)
+    log.info("model ready: %s", molmo.health())
 
     if task_indices is None:
         task_indices = [i for i, _ in list_suite_tasks(suite)]
@@ -109,9 +93,9 @@ def run_libero_benchmark(
     run = RunRecord(
         run_id=f"libero-{suite}-{time.strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:6]}",
         started_at=time.time(),
-        model_id=health.get("model_id", "?"),
+        model_id=model_id,
         franka_endpoint=f"sim:{suite}",
-        molmoact_endpoint=molmoact_url,
+        molmoact_endpoint="in-process",
     )
 
     for task_index in task_indices:
@@ -125,15 +109,13 @@ def run_libero_benchmark(
                 tr = run_trial(
                     env, trial, init_idx, molmo,
                     max_steps=max_steps,
-                    n_action_chunk=n_action_chunk,
-                    action_scale=action_scale,
-                    action_clip=action_clip,
+                    num_steps=num_steps,
                     seed=seed + trial,
                 )
                 run.trials.append(tr)
                 run.dump(results_dir)
-                log.info("trial done: %s/#%d success=%s steps=%d",
-                         tr.task_id, tr.trial, tr.success, tr.n_steps)
+                log.info("trial done: %s/#%d success=%s steps=%d wallclock=%.1fs",
+                         tr.task_id, tr.trial, tr.success, tr.n_steps, tr.wallclock_s)
         finally:
             env.close()
     return run
