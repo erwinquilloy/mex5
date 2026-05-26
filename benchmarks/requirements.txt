@@ -1,0 +1,4 @@
+requests
+numpy
+pillow
+pyrealsense2 ; sys_platform != "darwin"
