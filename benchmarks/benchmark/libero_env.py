@@ -77,7 +77,7 @@ class LiberoEnv:
 
         task = self._suite.get_task(task_index)
         bddl = os.path.join(get_libero_path("bddl_files"), task.problem_folder, task.bddl_file)
-        init_states = self._suite.get_task_init_states(task_id=task_index)
+        init_states = self._suite.get_task_init_states(task_index)
 
         self.spec = LiberoTaskSpec(
             suite=suite,

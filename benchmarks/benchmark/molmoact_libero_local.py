@@ -83,5 +83,8 @@ class MolmoActLiberoLocal:
                 enable_cuda_graph=self._enable_cuda_graph,
             )
         dt_ms = (time.perf_counter() - t0) * 1000.0
-        actions = np.asarray(out.actions, dtype=np.float32).reshape(-1, 7)
+        raw = out.actions
+        if hasattr(raw, "detach"):
+            raw = raw.detach().to("cpu").float().numpy()
+        actions = np.asarray(raw, dtype=np.float32).reshape(-1, 7)
         return LiberoPrediction(actions=actions, server_dt_ms=dt_ms, rtt_ms=dt_ms)
