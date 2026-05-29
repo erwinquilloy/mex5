@@ -5,10 +5,11 @@ Two evaluation paths share a common metrics schema (`benchmark/metrics.py`):
 
 | Path | Model | Where it runs | Auto-scored? | Purpose |
 |---|---|---|---|---|
-| **LIBERO sim** (`scripts/run_libero_benchmark.py`) | `allenai/MolmoAct2-LIBERO` | one Python process on the HPC GPU (in-process, no HTTP) | yes (`env.check_success()`) | **Primary**: get suite-wide success numbers fast, no robot |
-| **DROID real-robot** (`scripts/run_droid_benchmark.py`) | `allenai/MolmoAct2-DROID` | upstream `host_server_droid.py` on HPC + tunnel + workstation client | no (human grader) | Table 6 reproduction once sim is validated |
+| **DROID real-robot** (`scripts/run_droid_benchmark.py`) | `allenai/MolmoAct2-DROID` | upstream `host_server_droid.py` on HPC + tunnel + workstation client | no (human grader) | **Primary**: Table 6 reproduction of arXiv:2605.02881 (the course exercise target) |
+| **LIBERO sim** (`scripts/run_libero_benchmark.py`) | `allenai/MolmoAct2-LIBERO` | one Python process on the HPC GPU (in-process, no HTTP) | yes (`env.check_success()`) | Smoke test / debug — fast suite-wide success numbers without a robot |
 
-Current focus: **LIBERO sim first**, real robot later.
+Current focus: **DROID real-robot** for the Table 6 zero-shot replication. The
+LIBERO sim path remains useful for fast smoke testing of the model + harness.
 
 ## Sim path (LIBERO + MolmoAct2-LIBERO)
 

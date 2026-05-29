@@ -25,6 +25,26 @@ mkdir -p $HOME/hf-cache
 export HF_HOME=$HOME/hf-cache              # add to ~/.bashrc to persist
 ```
 
+## Required upstream patch — `action_mode` kwarg rename
+
+Upstream `examples/droid/host_server_droid.py` passes `action_mode="continuous"`
+to `predict_action(...)`, but the current MolmoAct2 model code on HF expects
+`inference_action_mode`. Without the rename the server still starts and serves
+`GET /act` 200, but **every real `/act` call returns 500** and the startup log
+contains `TypeError: predict_action() got an unexpected keyword argument 'action_mode'`
+from the warmup. Re-apply this patch on every fresh clone of `~/molmoact2`:
+
+```bash
+sed -i 's/action_mode="continuous"/inference_action_mode="continuous"/' \
+  ~/molmoact2/examples/droid/host_server_droid.py
+
+# verify
+grep -n 'inference_action_mode="continuous"' \
+  ~/molmoact2/examples/droid/host_server_droid.py    # expect: one match
+```
+
+After relaunch, look for `Warmup OK (XXXX ms)` in the server log to confirm.
+
 ## Per-session: launch the server
 
 ```bash
@@ -40,6 +60,10 @@ Verify (in another shell on the HPC):
 ```bash
 curl http://localhost:$PORT/act    # GET /act returns the health blob with norm_tag etc.
 ```
+
+`GET /act` 200 alone is **not** enough — re-read the server log and confirm
+`Warmup OK (...)` is present. If you only see `Listening on 0.0.0.0:<PORT>`
+without a warmup-OK line, the upstream `action_mode` patch above is missing.
 
 ## Workstation: SSH tunnel
 
