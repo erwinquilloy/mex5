@@ -44,7 +44,9 @@ mkdir -p $HF_HOME
 ### Run on the HPC GPU
 
 ```bash
+conda activate molmoact2-libero        # required -- (base) is missing the deps
 cd ~/mex5
+export CUDA_VISIBLE_DEVICES=3          # pick a free GPU on the node (nvidia-smi to check)
 
 # list tasks in a suite (no model load -- fast)
 python -m benchmarks.scripts.run_libero_benchmark --list libero_spatial
@@ -61,6 +63,10 @@ for s in libero_spatial libero_object libero_goal libero_10; do
   python -m benchmarks.scripts.run_libero_benchmark --suite $s --trials 5
 done
 ```
+
+Common stumbles:
+- `ModuleNotFoundError: No module named 'benchmarks'` → you're not in `~/mex5`, or you forgot `conda activate molmoact2-libero`.
+- Crash inside `LiberoEnv.reset()` about `task_id=` kwarg, or `np.asarray(...)` on a CUDA tensor → pull latest; both fixed in `54533a3`.
 
 Results stream into `benchmarks/results/<run_id>.json` after every trial. The
 final stdout block prints overall success rate, per-task success rate, and
