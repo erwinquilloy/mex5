@@ -5,6 +5,33 @@ from [`allenai/molmoact2`](https://github.com/allenai/molmoact2)) rather than a 
 one. The schema is fixed by the model card: two cameras + `state[8]` in, `actions[N,8]`
 out (absolute joint targets + gripper).
 
+## Currently running on `ai-n002`
+
+Snapshot of the deployment in use for the Table 6 reproduction. Port/PID change
+across sessions — re-check with `ss -ltnp` and `nvidia-smi -i 3` before relying
+on them.
+
+| Field | Value |
+| --- | --- |
+| Model | `allenai/MolmoAct2-DROID` (HF Hub) |
+| Role | Zero-shot DROID Franka — Table 6 target of arXiv:2605.02881 |
+| Serving stack | FastAPI + HuggingFace `transformers` (eager forward, **not** vLLM) |
+| Entry point | `~/molmoact2/examples/droid/host_server_droid.py` |
+| Launcher | `uv run python examples/droid/host_server_droid.py --host 0.0.0.0 --port 53841 --dtype bfloat16` |
+| Host / port | `ai-n002.hpc.coe.upd.edu.ph:53841` (bound `0.0.0.0`) |
+| Dtype | `bfloat16` |
+| GPU | GPU 3 — NVIDIA A100-SXM4-40GB, ~12 GB VRAM in use |
+| Patch applied | `inference_action_mode="continuous"` at `host_server_droid.py:208` |
+| Inference path | Continuous flow-matching action expert (paper §4.3.2 default) |
+| CUDA Graphs | As shipped by upstream — not separately enabled |
+| Auth | **None** — open to anyone who can reach the port |
+| API surface | `GET /act` (health), `POST /act` (inference), `GET /docs`, `GET /redoc`, `GET /openapi.json` |
+| Schema | DROID: 2 cameras + `state[8]` in → `actions[N,8]` out |
+| Control rate | 15 Hz (DROID native; matches the checkpoint's training config) |
+
+For reference, paper §6.8 reports MolmoAct2 at 55.79 Hz on a **single H100** with
+CUDA Graphs enabled — we won't match that on A100-40GB without the same setup.
+
 ## One-time setup on `ai-n002.hpc.coe.upd.edu.ph`
 
 ```bash
@@ -72,6 +99,18 @@ without a warmup-OK line, the upstream `action_mode` patch above is missing.
 ssh -N -L 8000:localhost:PORT erwin.quilloy@ai-n002.hpc.coe.upd.edu.ph
 # now http://localhost:8000 on the workstation reaches the HPC server
 ```
+
+## Browser views (FastAPI auto-docs)
+
+There is no purpose-built dashboard — `host_server_droid.py` is a FastAPI app, so
+the only browser-accessible views are the auto-generated schema pages. With the
+tunnel above open, on the workstation:
+
+- `http://localhost:8000/docs` — Swagger UI: lists endpoints, lets you POST test payloads
+- `http://localhost:8000/redoc` — read-only schema view
+- `http://localhost:8000/openapi.json` — raw schema
+
+For GPU/process visibility, SSH into `ai-n002` and `watch -n 2 nvidia-smi -i 3`.
 
 ## Notes
 
