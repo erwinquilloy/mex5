@@ -85,6 +85,14 @@ def _rotate(img: np.ndarray, deg: int) -> np.ndarray:
     raise ValueError(f"rotation must be one of {_VALID_ROT}, got {deg}")
 
 
+def _apply_flips(img: np.ndarray, flip_h: bool, flip_v: bool) -> np.ndarray:
+    if flip_h:
+        img = np.ascontiguousarray(img[:, ::-1, :])
+    if flip_v:
+        img = np.ascontiguousarray(img[::-1, :, :])
+    return img
+
+
 class DualCamera:
     """external + wrist capture with three configurable modes."""
 
@@ -97,10 +105,14 @@ class DualCamera:
         height: int = 256,
         fps: int = 30,
         external_rotation_deg: int = 0,
+        external_flip_h: bool = False,
+        external_flip_v: bool = False,
     ):
         if external_rotation_deg not in _VALID_ROT:
             raise ValueError(f"external_rotation_deg must be one of {_VALID_ROT}")
         self._ext_rot = external_rotation_deg
+        self._ext_flip_h = bool(external_flip_h)
+        self._ext_flip_v = bool(external_flip_v)
         self._wrist = _RealsenseWrist(wrist_serial, width, height, fps)
         self._external = None
         self._static_ext = None
@@ -124,6 +136,8 @@ class DualCamera:
             ext = wrist.copy()         # DUPLICATE mode
         if self._ext_rot:
             ext = _rotate(ext, self._ext_rot)
+        if self._ext_flip_h or self._ext_flip_v:
+            ext = _apply_flips(ext, self._ext_flip_h, self._ext_flip_v)
         return Frames(external=ext, wrist=wrist, t_grab_ms=(time.perf_counter() - t0) * 1000.0)
 
     def close(self) -> None:
@@ -144,4 +158,6 @@ def from_env() -> DualCamera:
         width=int(os.environ.get("FRANKA_BENCH_CAM_W", "256")),
         height=int(os.environ.get("FRANKA_BENCH_CAM_H", "256")),
         external_rotation_deg=int(os.environ.get("FRANKA_BENCH_EXT_ROT_DEG", "0")),
+        external_flip_h=os.environ.get("FRANKA_BENCH_EXT_FLIP_H", "0") not in ("0", "", "false", "False"),
+        external_flip_v=os.environ.get("FRANKA_BENCH_EXT_FLIP_V", "0") not in ("0", "", "false", "False"),
     )
