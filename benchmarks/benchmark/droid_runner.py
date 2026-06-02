@@ -47,6 +47,7 @@ def run_trial(
     num_steps: int,
     chunk_step_dt_s: float,
     exec_rows: int = 3,
+    grasp_commit_grip_frac: float = 0.5,
 ) -> TrialRecord:
     rec = TrialRecord(task_id=task.task_id, trial=trial, success=False, n_steps=0, wallclock_s=0.0)
     panda.home()
@@ -70,11 +71,21 @@ def run_trial(
             state=state8,
             num_steps=num_steps,
         )
-        # Receding-horizon execution: only run the first `exec_rows` of the
-        # predicted chunk before re-querying with a fresh frame. Matches how
-        # DROID-style policies are meant to be deployed (small open-loop bursts
-        # closed by fresh visual feedback).
-        rows_to_run = pred.actions[:max(1, exec_rows)] if exec_rows > 0 else pred.actions
+        # Adaptive receding-horizon execution:
+        # - When the model is still approaching (gripper-open chunk), run a
+        #   short burst (`exec_rows`) and re-query to let visual feedback
+        #   correct the trajectory.
+        # - When the model has committed to a grasp/manipulation (at least
+        #   `grasp_commit_grip_frac` of the chunk rows command gripper-close),
+        #   commit the full chunk; interrupting a closing-gripper trajectory
+        #   for inference latency would let the object slip / move it past
+        #   the target before re-closing.
+        gripper_signal = pred.actions[:, 7] >= 0.5
+        grasp_committed = (gripper_signal.sum() >= grasp_commit_grip_frac * len(gripper_signal))
+        if grasp_committed or exec_rows <= 0:
+            rows_to_run = pred.actions
+        else:
+            rows_to_run = pred.actions[:max(1, exec_rows)]
         with exec_sw():
             panda.send_chunk(rows_to_run, step_dt_s=chunk_step_dt_s)
         e2e_ms = (time.perf_counter() - e2e_t0) * 1000.0
@@ -105,6 +116,7 @@ def run_droid_benchmark(
     chunk_step_dt_s: float = 0.1,
     results_dir: str = "benchmarks/results",
     exec_rows: int = 3,
+    grasp_commit_grip_frac: float = 0.5,
 ) -> RunRecord:
     client = DroidClient(molmoact_url)
     health = client.health()
@@ -131,7 +143,8 @@ def run_droid_benchmark(
                     tr = run_trial(task, trial, camera, client, panda,
                                    num_steps=num_steps,
                                    chunk_step_dt_s=chunk_step_dt_s,
-                                   exec_rows=exec_rows)
+                                   exec_rows=exec_rows,
+                                   grasp_commit_grip_frac=grasp_commit_grip_frac)
                 except KeyboardInterrupt:
                     log.warning("aborted by operator at %s/#%d", task.task_id, trial)
                     raise

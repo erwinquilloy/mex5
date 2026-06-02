@@ -35,6 +35,8 @@ def main(argv: list[str] | None = None) -> int:
                     help="commanded duration per action row (sec)")
     ap.add_argument("--exec-rows", type=int, default=3,
                     help="rows of each predicted chunk to execute before re-querying with a fresh frame (receding-horizon). 0 = run the whole chunk (old behavior).")
+    ap.add_argument("--grasp-commit-grip-frac", type=float, default=0.5,
+                    help="when at least this fraction of the chunk commands gripper-close, run the WHOLE chunk instead of just --exec-rows (don't interrupt a grasp).")
     ap.add_argument("--results-dir", default="benchmarks/results")
     args = ap.parse_args(argv)
 
@@ -50,6 +52,7 @@ def main(argv: list[str] | None = None) -> int:
         chunk_step_dt_s=args.chunk_step_dt,
         results_dir=args.results_dir,
         exec_rows=args.exec_rows,
+        grasp_commit_grip_frac=args.grasp_commit_grip_frac,
     )
     summary = run.summary()
     print("\n===== SUMMARY =====")
