@@ -70,6 +70,21 @@ class _Webcam:
         except Exception: pass
 
 
+_VALID_ROT = (0, 90, 180, 270)
+
+
+def _rotate(img: np.ndarray, deg: int) -> np.ndarray:
+    if deg == 0:
+        return img
+    if deg == 90:
+        return np.ascontiguousarray(np.rot90(img, k=1))
+    if deg == 180:
+        return np.ascontiguousarray(np.rot90(img, k=2))
+    if deg == 270:
+        return np.ascontiguousarray(np.rot90(img, k=3))
+    raise ValueError(f"rotation must be one of {_VALID_ROT}, got {deg}")
+
+
 class DualCamera:
     """external + wrist capture with three configurable modes."""
 
@@ -81,7 +96,11 @@ class DualCamera:
         width: int = 256,
         height: int = 256,
         fps: int = 30,
+        external_rotation_deg: int = 0,
     ):
+        if external_rotation_deg not in _VALID_ROT:
+            raise ValueError(f"external_rotation_deg must be one of {_VALID_ROT}")
+        self._ext_rot = external_rotation_deg
         self._wrist = _RealsenseWrist(wrist_serial, width, height, fps)
         self._external = None
         self._static_ext = None
@@ -103,6 +122,8 @@ class DualCamera:
             ext = self._static_ext
         else:
             ext = wrist.copy()         # DUPLICATE mode
+        if self._ext_rot:
+            ext = _rotate(ext, self._ext_rot)
         return Frames(external=ext, wrist=wrist, t_grab_ms=(time.perf_counter() - t0) * 1000.0)
 
     def close(self) -> None:
@@ -122,4 +143,5 @@ def from_env() -> DualCamera:
         external_static_image=os.environ.get("FRANKA_BENCH_EXT_STATIC") or None,
         width=int(os.environ.get("FRANKA_BENCH_CAM_W", "256")),
         height=int(os.environ.get("FRANKA_BENCH_CAM_H", "256")),
+        external_rotation_deg=int(os.environ.get("FRANKA_BENCH_EXT_ROT_DEG", "0")),
     )
