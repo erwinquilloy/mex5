@@ -69,6 +69,35 @@ class PandaDriver:
 
     # ----- action chunk execution -----
 
+    def _apply_camera_z_offset(self, actions: np.ndarray, z_offset_m: float) -> np.ndarray:
+        """Lower (or raise) each commanded EE Z by ``z_offset_m`` via FK->shift->IK.
+
+        Compensates for the wrist camera being mounted above the gripper:
+        the model targets put the *camera* on the object, but we want the
+        *gripper* on the object. Sign convention: ``z_offset_m`` is the amount
+        to subtract from the commanded EE Z (so a positive value lowers the
+        gripper relative to where the camera would be). IK failures fall
+        through to the original target unchanged.
+        """
+        if abs(z_offset_m) < 1e-6:
+            return actions
+        try:
+            import panda_py
+        except Exception:
+            return actions
+        out = actions.copy()
+        for i in range(len(actions)):
+            q = actions[i, :7]
+            try:
+                pose = panda_py.fk(q)
+                pose[2, 3] -= z_offset_m
+                q_new = panda_py.ik(pose)
+                if q_new is not None and not np.any(np.isnan(q_new)):
+                    out[i, :7] = q_new
+            except Exception:
+                pass
+        return out
+
     def send_chunk(
         self,
         actions: np.ndarray,
@@ -76,6 +105,7 @@ class PandaDriver:
         grip_threshold: float = 0.5,
         substep_dt_s: float = 0.01,
         max_joint_vel_rad_s: float = 0.5,
+        wrist_cam_z_offset_m: float = 0.0,
     ) -> None:
         """Stream an (N, 8) action chunk through panda_py's JointPosition controller.
 
@@ -97,6 +127,9 @@ class PandaDriver:
             raise ValueError(f"expected (N, 8), got {actions.shape}")
         if len(actions) == 0:
             return
+
+        if wrist_cam_z_offset_m:
+            actions = self._apply_camera_z_offset(actions, wrist_cam_z_offset_m)
 
         nominal_sub = max(1, int(round(step_dt_s / max(substep_dt_s, 1e-3))))
 
