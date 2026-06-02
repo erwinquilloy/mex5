@@ -52,6 +52,28 @@ class PandaDriver:
             self._gripper.homing()
         except Exception:
             pass
+        # Match libfranka examples' setDefaultBehavior (common.cpp from
+        # roatienza/autonomous-robots and Franka's own examples). Looser
+        # collision thresholds reduce spurious reflex stops on contact, and
+        # the joint/Cartesian impedance values are the canonical defaults
+        # for examples that stream setpoints.
+        try:
+            self._panda.get_robot().setCollisionBehavior(
+                [20.0] * 7, [20.0] * 7,
+                [10.0] * 7, [10.0] * 7,
+                [20.0] * 6, [20.0] * 6,
+                [10.0] * 6, [10.0] * 6,
+            )
+        except Exception:
+            pass
+        try:
+            self._panda.get_robot().setJointImpedance([3000, 3000, 3000, 2500, 2500, 2000, 2000])
+        except Exception:
+            pass
+        try:
+            self._panda.get_robot().setCartesianImpedance([3000, 3000, 3000, 300, 300, 300])
+        except Exception:
+            pass
 
     # ----- state -----
 
@@ -69,17 +91,31 @@ class PandaDriver:
 
     # ----- action chunk execution -----
 
-    def _apply_camera_z_offset(self, actions: np.ndarray, z_offset_m: float) -> np.ndarray:
-        """Lower (or raise) each commanded EE Z by ``z_offset_m`` via FK->shift->IK.
+    def _apply_camera_offset_ee_frame(
+        self,
+        actions: np.ndarray,
+        offset_ee_xyz_m: np.ndarray,
+    ) -> np.ndarray:
+        """Translate each commanded EE pose by an offset expressed in the EE LOCAL frame.
 
-        Compensates for the wrist camera being mounted above the gripper:
-        the model targets put the *camera* on the object, but we want the
-        *gripper* on the object. Sign convention: ``z_offset_m`` is the amount
-        to subtract from the commanded EE Z (so a positive value lowers the
-        gripper relative to where the camera would be). IK failures fall
-        through to the original target unchanged.
+        Compensates for a wrist camera mounted at some fixed offset from the
+        gripper tip. The model puts the camera on the object; we want the
+        gripper on the object. The compensation must follow the gripper's
+        orientation (rotates with the wrist) so it's applied in EE-local axes,
+        not world axes.
+
+        Convention: ``offset_ee_xyz_m`` is the vector to ADD to the commanded
+        EE position, expressed in the EE local frame. Common case: camera
+        mounted 50 mm above the gripper along EE -Z (i.e., on the back of the
+        fingers, away from the grasp direction), to compensate use
+        ``(0, 0, 0.05)`` which advances the gripper 50 mm further along the
+        gripper's own +Z (the grasping direction) to bring it to where the
+        camera was pointing.
+
+        IK failures fall through to the original joint target unchanged.
         """
-        if abs(z_offset_m) < 1e-6:
+        offset = np.asarray(offset_ee_xyz_m, dtype=np.float64)
+        if offset.shape != (3,) or np.linalg.norm(offset) < 1e-6:
             return actions
         try:
             import panda_py
@@ -90,7 +126,8 @@ class PandaDriver:
             q = actions[i, :7]
             try:
                 pose = panda_py.fk(q)
-                pose[2, 3] -= z_offset_m
+                R = pose[:3, :3]
+                pose[:3, 3] = pose[:3, 3] + R @ offset
                 q_new = panda_py.ik(pose)
                 if q_new is not None and not np.any(np.isnan(q_new)):
                     out[i, :7] = q_new
@@ -105,7 +142,7 @@ class PandaDriver:
         grip_threshold: float = 0.5,
         substep_dt_s: float = 0.01,
         max_joint_vel_rad_s: float = 0.5,
-        wrist_cam_z_offset_m: float = 0.0,
+        wrist_cam_offset_ee_xyz_m: Optional[np.ndarray] = None,
     ) -> None:
         """Stream an (N, 8) action chunk through panda_py's JointPosition controller.
 
@@ -128,8 +165,8 @@ class PandaDriver:
         if len(actions) == 0:
             return
 
-        if wrist_cam_z_offset_m:
-            actions = self._apply_camera_z_offset(actions, wrist_cam_z_offset_m)
+        if wrist_cam_offset_ee_xyz_m is not None:
+            actions = self._apply_camera_offset_ee_frame(actions, wrist_cam_offset_ee_xyz_m)
 
         nominal_sub = max(1, int(round(step_dt_s / max(substep_dt_s, 1e-3))))
 
