@@ -99,13 +99,11 @@ def run_trial(
         else:
             rows_to_run = pred.actions
         lock_down = os.environ.get("FRANKA_BENCH_LOCK_GRIPPER_DOWN", "0") not in ("0", "", "false", "False")
-        z_off = float(os.environ.get("FRANKA_BENCH_WRIST_CAM_Z_OFFSET_M", "0.0"))
         with exec_sw():
             panda.send_chunk(
                 rows_to_run,
                 step_dt_s=chunk_step_dt_s,
                 lock_gripper_down=lock_down,
-                wrist_cam_z_offset_m=z_off,
             )
         e2e_ms = (time.perf_counter() - e2e_t0) * 1000.0
         rec.steps.append(StepRecord(
