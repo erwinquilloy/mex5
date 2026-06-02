@@ -91,50 +91,6 @@ class PandaDriver:
 
     # ----- action chunk execution -----
 
-    def _apply_camera_offset_ee_frame(
-        self,
-        actions: np.ndarray,
-        offset_ee_xyz_m: np.ndarray,
-    ) -> np.ndarray:
-        """Translate each commanded EE pose by an offset expressed in the EE LOCAL frame.
-
-        Compensates for a wrist camera mounted at some fixed offset from the
-        gripper tip. The model puts the camera on the object; we want the
-        gripper on the object. The compensation must follow the gripper's
-        orientation (rotates with the wrist) so it's applied in EE-local axes,
-        not world axes.
-
-        Convention: ``offset_ee_xyz_m`` is the vector to ADD to the commanded
-        EE position, expressed in the EE local frame. Common case: camera
-        mounted 50 mm above the gripper along EE -Z (i.e., on the back of the
-        fingers, away from the grasp direction), to compensate use
-        ``(0, 0, 0.05)`` which advances the gripper 50 mm further along the
-        gripper's own +Z (the grasping direction) to bring it to where the
-        camera was pointing.
-
-        IK failures fall through to the original joint target unchanged.
-        """
-        offset = np.asarray(offset_ee_xyz_m, dtype=np.float64)
-        if offset.shape != (3,) or np.linalg.norm(offset) < 1e-6:
-            return actions
-        try:
-            import panda_py
-        except Exception:
-            return actions
-        out = actions.copy()
-        for i in range(len(actions)):
-            q = actions[i, :7]
-            try:
-                pose = panda_py.fk(q)
-                R = pose[:3, :3]
-                pose[:3, 3] = pose[:3, 3] + R @ offset
-                q_new = panda_py.ik(pose)
-                if q_new is not None and not np.any(np.isnan(q_new)):
-                    out[i, :7] = q_new
-            except Exception:
-                pass
-        return out
-
     def send_chunk(
         self,
         actions: np.ndarray,
@@ -142,7 +98,6 @@ class PandaDriver:
         grip_threshold: float = 0.5,
         substep_dt_s: float = 0.01,
         max_joint_vel_rad_s: float = 0.5,
-        wrist_cam_offset_ee_xyz_m: Optional[np.ndarray] = None,
     ) -> None:
         """Stream an (N, 8) action chunk through panda_py's JointPosition controller.
 
@@ -164,9 +119,6 @@ class PandaDriver:
             raise ValueError(f"expected (N, 8), got {actions.shape}")
         if len(actions) == 0:
             return
-
-        if wrist_cam_offset_ee_xyz_m is not None:
-            actions = self._apply_camera_offset_ee_frame(actions, wrist_cam_offset_ee_xyz_m)
 
         nominal_sub = max(1, int(round(step_dt_s / max(substep_dt_s, 1e-3))))
 

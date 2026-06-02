@@ -99,11 +99,7 @@ def run_trial(
         else:
             rows_to_run = pred.actions
         with exec_sw():
-            panda.send_chunk(
-                rows_to_run,
-                step_dt_s=chunk_step_dt_s,
-                wrist_cam_z_offset_m=float(os.environ.get("FRANKA_BENCH_WRIST_CAM_Z_OFFSET_M", "0.0")),
-            )
+            panda.send_chunk(rows_to_run, step_dt_s=chunk_step_dt_s)
         e2e_ms = (time.perf_counter() - e2e_t0) * 1000.0
         rec.steps.append(StepRecord(
             step=len(rec.steps),
