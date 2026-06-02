@@ -74,14 +74,16 @@ class PandaDriver:
         actions: np.ndarray,
         step_dt_s: float = 0.1,
         grip_threshold: float = 0.5,
+        substep_dt_s: float = 0.01,
     ) -> None:
         """Stream an (N, 8) action chunk through panda_py's JointPosition controller.
 
-        Holds a single controller active across all setpoints so the arm tracks
-        smoothly between waypoints instead of stop-and-go (which the previous
-        per-step `move_to_joint_position` calls produced). Gripper toggles
-        happen between setpoint updates since the gripper RPCs aren't safe to
-        invoke inside the streaming loop.
+        Holds a single controller active across all setpoints, and between
+        consecutive chunk rows linearly interpolates the setpoint at
+        ``substep_dt_s`` resolution so the controller sees a ramp instead of a
+        step. This avoids the reflex stops that bare step-to-step updates
+        triggered. Gripper toggles happen between substep loops since the
+        gripper RPCs aren't safe to invoke inside the streaming loop.
         """
         import panda_py.controllers as pc
 
@@ -94,6 +96,8 @@ class PandaDriver:
         ctrl = pc.JointPosition()
         self._panda.start_controller(ctrl)
         try:
+            prev_q = np.asarray(self._panda.get_state().q, dtype=np.float64)
+            n_sub = max(1, int(round(step_dt_s / max(substep_dt_s, 1e-3))))
             last_grip: Optional[bool] = None
             for row in actions:
                 q_target = row[:7]
@@ -104,8 +108,13 @@ class PandaDriver:
                     else:
                         self._gripper.move(_GRIPPER_MAX_M, 0.1)
                     last_grip = close
-                ctrl.set_control(q_target)
-                time.sleep(step_dt_s)
+                # ramp setpoint from prev_q -> q_target across n_sub ticks
+                for k in range(1, n_sub + 1):
+                    alpha = k / n_sub
+                    q_interp = prev_q + alpha * (q_target - prev_q)
+                    ctrl.set_control(q_interp)
+                    time.sleep(substep_dt_s)
+                prev_q = q_target
         finally:
             try:
                 self._panda.stop_controller()
