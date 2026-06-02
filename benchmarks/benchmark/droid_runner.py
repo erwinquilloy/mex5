@@ -102,8 +102,7 @@ def run_droid_benchmark(
     client = DroidClient(molmoact_url)
     health = client.health()
     log.info("server health: %s", health)
-    live_view.start(port=8080)
-    log.info("live cam view: http://<workstation-ip>:8080/")
+    log.info("live cam view: run `python -m benchmarks.scripts.serve_live` in another shell, then open http://<workstation-ip>:8080/")
 
     panda = PandaDriver(hostname=franka_host)
     camera = camera_from_env()

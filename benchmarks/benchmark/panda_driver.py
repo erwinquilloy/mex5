@@ -75,30 +75,42 @@ class PandaDriver:
         step_dt_s: float = 0.1,
         grip_threshold: float = 0.5,
     ) -> None:
-        """Replay an (N, 8) action chunk.
+        """Stream an (N, 8) action chunk through panda_py's JointPosition controller.
 
-        Each row commands `move_to_joint_position` toward `actions[i, :7]` with
-        a short motion budget. Gripper toggles only on transitions to avoid
-        spamming the gripper driver.
+        Holds a single controller active across all setpoints so the arm tracks
+        smoothly between waypoints instead of stop-and-go (which the previous
+        per-step `move_to_joint_position` calls produced). Gripper toggles
+        happen between setpoint updates since the gripper RPCs aren't safe to
+        invoke inside the streaming loop.
         """
+        import panda_py.controllers as pc
+
         actions = np.asarray(actions, dtype=np.float64)
         if actions.ndim != 2 or actions.shape[1] != 8:
             raise ValueError(f"expected (N, 8), got {actions.shape}")
-        last_grip: Optional[bool] = None
-        for row in actions:
-            q_target = row[:7]
-            close = bool(row[7] >= grip_threshold)
-            if last_grip is None or close != last_grip:
-                if close:
-                    self._gripper.grasp(0.0, 0.1, 60, epsilon_inner=0.04, epsilon_outer=0.04)
-                else:
-                    self._gripper.move(_GRIPPER_MAX_M, 0.1)
-                last_grip = close
-            # blocking move; speed_factor caps duration roughly at step_dt_s.
-            self._panda.move_to_joint_position(q_target, speed_factor=min(1.0, 0.5))
-            # If panda_py returned faster than step_dt_s (because the move was tiny),
-            # honor the requested chunk rhythm. If slower, just continue immediately.
-            time.sleep(0)
+        if len(actions) == 0:
+            return
+
+        ctrl = pc.JointPosition()
+        self._panda.start_controller(ctrl)
+        try:
+            last_grip: Optional[bool] = None
+            for row in actions:
+                q_target = row[:7]
+                close = bool(row[7] >= grip_threshold)
+                if last_grip is None or close != last_grip:
+                    if close:
+                        self._gripper.grasp(0.0, 0.1, 60, epsilon_inner=0.04, epsilon_outer=0.04)
+                    else:
+                        self._gripper.move(_GRIPPER_MAX_M, 0.1)
+                    last_grip = close
+                ctrl.set_control(q_target)
+                time.sleep(step_dt_s)
+        finally:
+            try:
+                self._panda.stop_controller()
+            except Exception:
+                pass
 
     # ----- lifecycle -----
 
