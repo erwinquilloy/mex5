@@ -6,6 +6,8 @@ import time
 import uuid
 from typing import Optional
 
+import numpy as np
+
 from . import live_view
 from .dual_camera import DualCamera, Frames, from_env as camera_from_env
 from .droid_tasks import DroidTask, all_tasks, by_id
@@ -48,6 +50,7 @@ def run_trial(
     chunk_step_dt_s: float,
     exec_rows: int = 3,
     grasp_commit_grip_frac: float = 0.5,
+    fine_refinement_travel_rad: float = 0.2,
 ) -> TrialRecord:
     rec = TrialRecord(task_id=task.task_id, trial=trial, success=False, n_steps=0, wallclock_s=0.0)
     panda.home()
@@ -71,21 +74,29 @@ def run_trial(
             state=state8,
             num_steps=num_steps,
         )
-        # Adaptive receding-horizon execution:
-        # - When the model is still approaching (gripper-open chunk), run a
-        #   short burst (`exec_rows`) and re-query to let visual feedback
-        #   correct the trajectory.
-        # - When the model has committed to a grasp/manipulation (at least
-        #   `grasp_commit_grip_frac` of the chunk rows command gripper-close),
-        #   commit the full chunk; interrupting a closing-gripper trajectory
-        #   for inference latency would let the object slip / move it past
-        #   the target before re-closing.
+        # Adaptive execution. Default = trust the model and run the full
+        # chunk in one open-loop burst (less stop-and-go, faster overall).
+        # Only switch to short receding-horizon bursts when the chunk is
+        # clearly a fine-refinement (small total joint travel) - that's the
+        # case where the policy is "twitching toward target near the object"
+        # and benefits from fresh visual after each small correction.
+        #
+        # Always commit the full chunk when the gripper is closing (grasp
+        # phase); interrupting that for inference latency causes failures.
         gripper_signal = pred.actions[:, 7] >= 0.5
         grasp_committed = (gripper_signal.sum() >= grasp_commit_grip_frac * len(gripper_signal))
-        if grasp_committed or exec_rows <= 0:
-            rows_to_run = pred.actions
+        if len(pred.actions) > 1:
+            deltas = np.diff(pred.actions[:, :7], axis=0)
+            total_travel_rad = float(np.sum(np.linalg.norm(deltas, axis=1)))
         else:
+            total_travel_rad = 0.0
+        is_fine_refinement = total_travel_rad < fine_refinement_travel_rad
+        if grasp_committed:
+            rows_to_run = pred.actions
+        elif is_fine_refinement and exec_rows > 0:
             rows_to_run = pred.actions[:max(1, exec_rows)]
+        else:
+            rows_to_run = pred.actions
         with exec_sw():
             panda.send_chunk(rows_to_run, step_dt_s=chunk_step_dt_s)
         e2e_ms = (time.perf_counter() - e2e_t0) * 1000.0
@@ -117,6 +128,7 @@ def run_droid_benchmark(
     results_dir: str = "benchmarks/results",
     exec_rows: int = 3,
     grasp_commit_grip_frac: float = 0.5,
+    fine_refinement_travel_rad: float = 0.2,
 ) -> RunRecord:
     client = DroidClient(molmoact_url)
     health = client.health()
@@ -144,7 +156,8 @@ def run_droid_benchmark(
                                    num_steps=num_steps,
                                    chunk_step_dt_s=chunk_step_dt_s,
                                    exec_rows=exec_rows,
-                                   grasp_commit_grip_frac=grasp_commit_grip_frac)
+                                   grasp_commit_grip_frac=grasp_commit_grip_frac,
+                                   fine_refinement_travel_rad=fine_refinement_travel_rad)
                 except KeyboardInterrupt:
                     log.warning("aborted by operator at %s/#%d", task.task_id, trial)
                     raise

@@ -37,6 +37,8 @@ def main(argv: list[str] | None = None) -> int:
                     help="rows of each predicted chunk to execute before re-querying with a fresh frame (receding-horizon). 0 = run the whole chunk (old behavior).")
     ap.add_argument("--grasp-commit-grip-frac", type=float, default=0.5,
                     help="when at least this fraction of the chunk commands gripper-close, run the WHOLE chunk instead of just --exec-rows (don't interrupt a grasp).")
+    ap.add_argument("--fine-refinement-travel-rad", type=float, default=0.2,
+                    help="if total joint-space travel within a chunk is below this (radians), treat as fine refinement and only run --exec-rows. Larger chunks are run full open-loop. Default 0.2 ~= 11 deg total chunk travel.")
     ap.add_argument("--results-dir", default="benchmarks/results")
     args = ap.parse_args(argv)
 
@@ -53,6 +55,7 @@ def main(argv: list[str] | None = None) -> int:
         results_dir=args.results_dir,
         exec_rows=args.exec_rows,
         grasp_commit_grip_frac=args.grasp_commit_grip_frac,
+        fine_refinement_travel_rad=args.fine_refinement_travel_rad,
     )
     summary = run.summary()
     print("\n===== SUMMARY =====")
