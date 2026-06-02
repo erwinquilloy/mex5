@@ -33,6 +33,8 @@ def main(argv: list[str] | None = None) -> int:
                     help="flow-matching steps the model takes per inference call")
     ap.add_argument("--chunk-step-dt", type=float, default=0.1,
                     help="commanded duration per action row (sec)")
+    ap.add_argument("--exec-rows", type=int, default=3,
+                    help="rows of each predicted chunk to execute before re-querying with a fresh frame (receding-horizon). 0 = run the whole chunk (old behavior).")
     ap.add_argument("--results-dir", default="benchmarks/results")
     args = ap.parse_args(argv)
 
@@ -47,6 +49,7 @@ def main(argv: list[str] | None = None) -> int:
         num_steps=args.num_steps,
         chunk_step_dt_s=args.chunk_step_dt,
         results_dir=args.results_dir,
+        exec_rows=args.exec_rows,
     )
     summary = run.summary()
     print("\n===== SUMMARY =====")

@@ -46,6 +46,7 @@ def run_trial(
     panda: PandaDriver,
     num_steps: int,
     chunk_step_dt_s: float,
+    exec_rows: int = 3,
 ) -> TrialRecord:
     rec = TrialRecord(task_id=task.task_id, trial=trial, success=False, n_steps=0, wallclock_s=0.0)
     panda.home()
@@ -69,8 +70,13 @@ def run_trial(
             state=state8,
             num_steps=num_steps,
         )
+        # Receding-horizon execution: only run the first `exec_rows` of the
+        # predicted chunk before re-querying with a fresh frame. Matches how
+        # DROID-style policies are meant to be deployed (small open-loop bursts
+        # closed by fresh visual feedback).
+        rows_to_run = pred.actions[:max(1, exec_rows)] if exec_rows > 0 else pred.actions
         with exec_sw():
-            panda.send_chunk(pred.actions, step_dt_s=chunk_step_dt_s)
+            panda.send_chunk(rows_to_run, step_dt_s=chunk_step_dt_s)
         e2e_ms = (time.perf_counter() - e2e_t0) * 1000.0
         rec.steps.append(StepRecord(
             step=len(rec.steps),
@@ -78,9 +84,9 @@ def run_trial(
             infer_server_ms=pred.server_dt_ms,
             infer_rtt_ms=pred.rtt_ms,
             motion_rest_ms=exec_sw.ms,
-            motion_cmd_ms=chunk_step_dt_s * 1000.0 * len(pred.actions),
+            motion_cmd_ms=chunk_step_dt_s * 1000.0 * len(rows_to_run),
             e2e_ms=e2e_ms,
-            action=pred.actions[-1].astype(float).tolist(),   # log just the last cmd
+            action=rows_to_run[-1].astype(float).tolist(),   # log just the last cmd actually executed
             instruction=task.instruction,
         ))
 
@@ -98,6 +104,7 @@ def run_droid_benchmark(
     num_steps: int = 10,
     chunk_step_dt_s: float = 0.1,
     results_dir: str = "benchmarks/results",
+    exec_rows: int = 3,
 ) -> RunRecord:
     client = DroidClient(molmoact_url)
     health = client.health()
@@ -123,7 +130,8 @@ def run_droid_benchmark(
                 try:
                     tr = run_trial(task, trial, camera, client, panda,
                                    num_steps=num_steps,
-                                   chunk_step_dt_s=chunk_step_dt_s)
+                                   chunk_step_dt_s=chunk_step_dt_s,
+                                   exec_rows=exec_rows)
                 except KeyboardInterrupt:
                     log.warning("aborted by operator at %s/#%d", task.task_id, trial)
                     raise
