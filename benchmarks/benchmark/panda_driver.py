@@ -91,6 +91,61 @@ class PandaDriver:
 
     # ----- action chunk execution -----
 
+    def _lock_orientation_downward(
+        self,
+        actions: np.ndarray,
+        wrist_cam_z_offset_m: float = 0.0,
+    ) -> np.ndarray:
+        """Replace each commanded EE rotation with downward-facing, keeping yaw.
+
+        Rationale: the OOD camera prior distorts the model's commanded EE
+        orientation, causing the gripper to tilt inward and miss top-grasp
+        targets. We strip that orientation and force EE +Z to point straight
+        down (world -Z), preserving only the yaw (rotation around world Z)
+        from the model's prediction so the gripper still rotates to align
+        with the object's long axis.
+
+        With orientation locked vertical, the camera-above-gripper offset
+        becomes a pure world-Z shift, so the optional
+        ``wrist_cam_z_offset_m`` is applied here too (subtract it from EE Z
+        to bring the gripper to where the camera was pointing).
+
+        IK failures on a given row fall through to the original joints.
+        """
+        try:
+            import panda_py
+        except Exception:
+            return actions
+        out = actions.copy()
+        for i in range(len(actions)):
+            q = actions[i, :7]
+            try:
+                pose = panda_py.fk(q)
+                R = pose[:3, :3]
+                # Yaw from the model: project EE +X onto world XY plane.
+                ee_x_world = R[:, 0]
+                yaw_dir = np.array([ee_x_world[0], ee_x_world[1], 0.0], dtype=np.float64)
+                n = np.linalg.norm(yaw_dir)
+                if n < 1e-6:
+                    yaw_dir = np.array([1.0, 0.0, 0.0])
+                else:
+                    yaw_dir = yaw_dir / n
+                # Build a downward-facing rotation with this yaw.
+                new_x = yaw_dir
+                new_z = np.array([0.0, 0.0, -1.0])
+                new_y = np.cross(new_z, new_x)
+                new_y = new_y / np.linalg.norm(new_y)
+                R_new = np.column_stack([new_x, new_y, new_z])
+                pose[:3, :3] = R_new
+                if wrist_cam_z_offset_m:
+                    pose[2, 3] -= wrist_cam_z_offset_m
+                q_new = panda_py.ik(pose)
+                if q_new is not None and not np.any(np.isnan(q_new)):
+                    out[i, :7] = q_new
+            except Exception:
+                pass
+        return out
+
     def send_chunk(
         self,
         actions: np.ndarray,
@@ -98,6 +153,8 @@ class PandaDriver:
         grip_threshold: float = 0.5,
         substep_dt_s: float = 0.01,
         max_joint_vel_rad_s: float = 0.5,
+        lock_gripper_down: bool = False,
+        wrist_cam_z_offset_m: float = 0.0,
     ) -> None:
         """Stream an (N, 8) action chunk through panda_py's JointPosition controller.
 
@@ -119,6 +176,9 @@ class PandaDriver:
             raise ValueError(f"expected (N, 8), got {actions.shape}")
         if len(actions) == 0:
             return
+
+        if lock_gripper_down:
+            actions = self._lock_orientation_downward(actions, wrist_cam_z_offset_m)
 
         nominal_sub = max(1, int(round(step_dt_s / max(substep_dt_s, 1e-3))))
 
