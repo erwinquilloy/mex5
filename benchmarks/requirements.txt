@@ -3,5 +3,6 @@ numpy
 pillow
 json-numpy
 opencv-python
+flask
 pyrealsense2 ; sys_platform == "linux"
 panda-python ; sys_platform == "linux"
