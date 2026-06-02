@@ -75,15 +75,20 @@ class PandaDriver:
         step_dt_s: float = 0.1,
         grip_threshold: float = 0.5,
         substep_dt_s: float = 0.01,
+        max_joint_vel_rad_s: float = 0.5,
     ) -> None:
         """Stream an (N, 8) action chunk through panda_py's JointPosition controller.
 
-        Holds a single controller active across all setpoints, and between
-        consecutive chunk rows linearly interpolates the setpoint at
+        Between consecutive chunk rows we linearly interpolate the setpoint at
         ``substep_dt_s`` resolution so the controller sees a ramp instead of a
-        step. This avoids the reflex stops that bare step-to-step updates
-        triggered. Gripper toggles happen between substep loops since the
-        gripper RPCs aren't safe to invoke inside the streaming loop.
+        step. The number of substeps per row is the larger of the nominal
+        ``step_dt_s / substep_dt_s`` and what's needed to keep peak joint
+        velocity under ``max_joint_vel_rad_s``. That way short moves still
+        finish in ``step_dt_s`` but the first big move out of home no longer
+        traverses a wide angle in 100 ms and trips the reflex.
+
+        Gripper toggles happen between substep loops since the gripper RPCs
+        aren't safe to invoke inside the streaming loop.
         """
         import panda_py.controllers as pc
 
@@ -93,11 +98,12 @@ class PandaDriver:
         if len(actions) == 0:
             return
 
+        nominal_sub = max(1, int(round(step_dt_s / max(substep_dt_s, 1e-3))))
+
         ctrl = pc.JointPosition()
         self._panda.start_controller(ctrl)
         try:
             prev_q = np.asarray(self._panda.get_state().q, dtype=np.float64)
-            n_sub = max(1, int(round(step_dt_s / max(substep_dt_s, 1e-3))))
             last_grip: Optional[bool] = None
             for row in actions:
                 q_target = row[:7]
@@ -108,10 +114,15 @@ class PandaDriver:
                     else:
                         self._gripper.move(_GRIPPER_MAX_M, 0.1)
                     last_grip = close
-                # ramp setpoint from prev_q -> q_target across n_sub ticks
+                # stretch the ramp so peak per-joint velocity stays bounded
+                delta = q_target - prev_q
+                vel_floor_sub = int(np.ceil(
+                    np.max(np.abs(delta)) / (max_joint_vel_rad_s * substep_dt_s)
+                ))
+                n_sub = max(nominal_sub, vel_floor_sub, 1)
                 for k in range(1, n_sub + 1):
                     alpha = k / n_sub
-                    q_interp = prev_q + alpha * (q_target - prev_q)
+                    q_interp = prev_q + alpha * delta
                     ctrl.set_control(q_interp)
                     time.sleep(substep_dt_s)
                 prev_q = q_target
