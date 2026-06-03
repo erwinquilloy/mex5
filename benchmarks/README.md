@@ -226,6 +226,13 @@ cd ~/mex5
 export FRANKA_BENCH_EXT_INDEX=0
 # optional: export FRANKA_BENCH_WRIST_SERIAL=<D457 serial>
 # optional: export FRANKA_BENCH_DEPTH_MAX_M=2.0          # depth colormap range
+
+# External-cam orientation. Canonical DROID is camera behind+above the robot;
+# if your tripod is in front looking back at the robot, robot +Y appears as
+# image-left, which the model reads as the opposite axis. Mirror it back:
+# export FRANKA_BENCH_EXT_FLIP_H=1
+# (X/forward-back is still OOD vs canonical -- no 2D transform fixes that.)
+# Also available: FRANKA_BENCH_EXT_FLIP_V, FRANKA_BENCH_EXT_ROT_DEG ∈ {0,90,180,270}.
 ```
 
 Then pick one of the three launches.

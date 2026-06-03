@@ -22,6 +22,28 @@ from typing import Optional
 import cv2
 import numpy as np
 
+_VALID_ROT = (0, 90, 180, 270)
+
+
+def _rotate(img: np.ndarray, deg: int) -> np.ndarray:
+    if deg == 0:
+        return img
+    if deg == 90:
+        return np.ascontiguousarray(np.rot90(img, k=1))
+    if deg == 180:
+        return np.ascontiguousarray(np.rot90(img, k=2))
+    if deg == 270:
+        return np.ascontiguousarray(np.rot90(img, k=3))
+    raise ValueError(f"rotation must be one of {_VALID_ROT}, got {deg}")
+
+
+def _apply_flips(img: np.ndarray, flip_h: bool, flip_v: bool) -> np.ndarray:
+    if flip_h:
+        img = np.ascontiguousarray(img[:, ::-1, :])
+    if flip_v:
+        img = np.ascontiguousarray(img[::-1, :, :])
+    return img
+
 
 @dataclass
 class _Latest:
@@ -72,9 +94,17 @@ class DashboardCamera:
         height: int = 256,
         fps: int = 30,
         depth_max_m: float = 2.0,
+        external_rotation_deg: int = 0,
+        external_flip_h: bool = False,
+        external_flip_v: bool = False,
     ):
         import pyrealsense2 as rs
 
+        if external_rotation_deg not in _VALID_ROT:
+            raise ValueError(f"external_rotation_deg must be one of {_VALID_ROT}")
+        self._ext_rot = int(external_rotation_deg)
+        self._ext_flip_h = bool(external_flip_h)
+        self._ext_flip_v = bool(external_flip_v)
         self._rs = rs
         self._pipe = rs.pipeline()
         cfg = rs.config()
@@ -138,6 +168,13 @@ class DashboardCamera:
             if ext_rgb is None:
                 # duplicate mode (degraded but keeps the panel alive)
                 ext_rgb = wrist_rgb.copy()
+            # Match DualCamera's external-cam transforms so the dashboard
+            # shows (and feeds to the model) the same image the CLI runner
+            # would. Wrist and depth are untouched.
+            if self._ext_rot:
+                ext_rgb = _rotate(ext_rgb, self._ext_rot)
+            if self._ext_flip_h or self._ext_flip_v:
+                ext_rgb = _apply_flips(ext_rgb, self._ext_flip_h, self._ext_flip_v)
 
             ext_jpg = _encode_jpeg(ext_rgb)
             wrist_jpg = _encode_jpeg(wrist_rgb)
@@ -190,4 +227,7 @@ def from_env() -> DashboardCamera:
         height=int(os.environ.get("FRANKA_BENCH_CAM_H", "256")),
         fps=int(os.environ.get("FRANKA_BENCH_CAM_FPS", "30")),
         depth_max_m=float(os.environ.get("FRANKA_BENCH_DEPTH_MAX_M", "2.0")),
+        external_rotation_deg=int(os.environ.get("FRANKA_BENCH_EXT_ROT_DEG", "0")),
+        external_flip_h=os.environ.get("FRANKA_BENCH_EXT_FLIP_H", "0") not in ("0", "", "false", "False"),
+        external_flip_v=os.environ.get("FRANKA_BENCH_EXT_FLIP_V", "0") not in ("0", "", "false", "False"),
     )
