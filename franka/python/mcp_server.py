@@ -27,13 +27,16 @@ ip = "192.168.2.1"
 port = 34568
 
 @mcp.tool()
-def send_command_tool(command: str, parameters: list) -> requests.Response:
+def send_command_tool(command: str, parameters: list) -> dict:
     """
     Send a command with floating point parameters to the server.
-    
+
     :param command: The command to send to the server.
     :param parameters: A list of floating point numbers representing coordinates or other parameters.
-    :return: The response from the server.
+    :return: Parsed JSON body returned by motion_server (dict), so fastmcp can
+             serialize it back to the MCP client. Returning a raw
+             requests.Response would round-trip as repr(), losing the numbers
+             that readJointState / readState callers need.
     """
     global ip, port
     url = f"http://{ip}:{port}/api/floats"
@@ -42,7 +45,10 @@ def send_command_tool(command: str, parameters: list) -> requests.Response:
     }
 
     response = requests.post(url, json=data)
-    return response
+    try:
+        return response.json()
+    except Exception:
+        return {"status_code": response.status_code, "text": response.text}
 
 
 if __name__ == "__main__":

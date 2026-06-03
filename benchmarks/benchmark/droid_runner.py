@@ -12,6 +12,8 @@ import numpy as np
 from . import live_view
 from .dual_camera import DualCamera, Frames, from_env as camera_from_env
 from .droid_tasks import DroidTask, all_tasks, by_id
+from .franka_mcp_driver import FrankaMcpDriver
+from .franka_rest_driver import FrankaRestDriver
 from .metrics import RunRecord, StepRecord, Stopwatch, TrialRecord
 from .molmoact_droid_client import DroidClient
 from .panda_driver import PandaDriver
@@ -46,7 +48,7 @@ def run_trial(
     trial: int,
     camera: DualCamera,
     client: DroidClient,
-    panda: PandaDriver,
+    panda,  # PandaDriver | FrankaRestDriver — same surface
     num_steps: int,
     chunk_step_dt_s: float,
     exec_rows: int = 3,
@@ -135,13 +137,36 @@ def run_droid_benchmark(
     exec_rows: int = 3,
     grasp_commit_grip_frac: float = 0.5,
     fine_refinement_travel_rad: float = 0.2,
+    transport: str = "fci",
+    rest_host: Optional[str] = None,
+    rest_port: int = 34568,
+    rest_step_time_s: float = 2.5,
+    mcp_url: Optional[str] = None,
 ) -> RunRecord:
     client = DroidClient(molmoact_url)
     health = client.health()
     log.info("server health: %s", health)
     log.info("live cam view: run `python -m benchmarks.scripts.serve_live` in another shell, then open http://<workstation-ip>:8080/")
 
-    panda = PandaDriver(hostname=franka_host)
+    if transport == "rest":
+        panda = FrankaRestDriver(
+            host=rest_host,
+            port=rest_port,
+            step_time_s=rest_step_time_s,
+        )
+        # On REST/MCP paths chunk_step_dt_s carries the per-row REST move
+        # duration, not the FCI substep ramp interval.
+        chunk_step_dt_s = rest_step_time_s
+    elif transport == "mcp":
+        panda = FrankaMcpDriver(
+            mcp_url=mcp_url,
+            step_time_s=rest_step_time_s,
+        )
+        chunk_step_dt_s = rest_step_time_s
+    elif transport == "fci":
+        panda = PandaDriver(hostname=franka_host)
+    else:
+        raise ValueError(f"unknown transport: {transport!r} (expected 'fci', 'rest', or 'mcp')")
     camera = camera_from_env()
 
     tasks = [by_id(t) for t in task_ids] if task_ids else all_tasks()
@@ -149,7 +174,7 @@ def run_droid_benchmark(
         run_id=f"droid-{time.strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:6]}",
         started_at=time.time(),
         model_id=health.get("repo_id", "?"),
-        franka_endpoint=(franka_host or "<env:FRANKA_HOST>"),
+        franka_endpoint=f"{transport}:{franka_host or rest_host or mcp_url or '<env>'}",
         molmoact_endpoint=molmoact_url,
     )
 

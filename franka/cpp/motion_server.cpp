@@ -144,6 +144,7 @@ public:
         double Alphaf = 0.0, Betaf = 0.0, Gammaf = 0.0;
         bool is_rotation = false;
         const double DEFAULT_MOTION_TIME = 5.0;
+        const double MIN_MOTION_TIME = 0.5;
 
         if (numbers.size() < 4)
         {
@@ -152,9 +153,9 @@ public:
         else if (numbers.size() >= 4)
         {
             tf = numbers[3];
-            if (tf < DEFAULT_MOTION_TIME)
+            if (tf < MIN_MOTION_TIME)
             {
-            tf = DEFAULT_MOTION_TIME;
+                tf = MIN_MOTION_TIME;
             }
         }
 
@@ -385,6 +386,27 @@ public:
                 beta  * 180.0 / M_PI,
                 gamma * 180.0 / M_PI};
     }
+
+    // Returns [q0..q6, gripper_width] so external controllers can build the
+    // 8-vector state input that joint-space VLA policies (e.g. MolmoAct2-DROID)
+    // expect. We share the same FCI connection as moveToCartesian / openGripper,
+    // so callers using REST get a consistent view of joint + gripper state.
+    std::vector<double> readJointState()
+    {
+        std::lock_guard<std::mutex> lock(robot_mutex);
+        const franka::RobotState& robot_state = robot.readOnce();
+        std::vector<double> out(8, 0.0);
+        for (int i = 0; i < 7; ++i) {
+            out[i] = robot_state.q[i];
+        }
+        try {
+            franka::GripperState gripper_state = gripper.readOnce();
+            out[7] = gripper_state.width;
+        } catch (const franka::Exception& e) {
+            out[7] = 0.0;
+        }
+        return out;
+    }
 };
 
 class RobotRestAPI {
@@ -447,6 +469,11 @@ private:
                         std::vector<double> state = robotHandler.readState();
                         for (int i = 0; i < 6; ++i) {
                             response[key][i] = json::value::number(state[i]);
+                        }
+                    } else if (key == "readJointState") {
+                        std::vector<double> jstate = robotHandler.readJointState();
+                        for (int i = 0; i < 8; ++i) {
+                            response[key][i] = json::value::number(jstate[i]);
                         }
                     } else {
                         std::cout << "Invalid command: " << key << std::endl;
