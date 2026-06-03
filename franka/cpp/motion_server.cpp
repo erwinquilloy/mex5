@@ -25,7 +25,14 @@ class RobotHandler {
     franka::Gripper gripper;
     std::mutex robot_mutex;  // libfranka is not thread-safe; serialize all robot calls
 public:
-    RobotHandler(const std::string& ip_addr) : robot(ip_addr), gripper(ip_addr) {
+    // RealtimeConfig::kIgnore lets motion_server run on a non-PREEMPT_RT kernel
+    // (libfranka 0.15+ defaults to kEnforce, which aborts startup with
+    // "Running kernel does not have realtime capabilities"). Our REST/MCP path
+    // commands cartesian moves with 0.5-2.5 s duration -- the server-side
+    // trajectory generator is the one running in the libfranka loop, and we
+    // don't need hard RT jitter guarantees for moves at that timescale.
+    RobotHandler(const std::string& ip_addr)
+        : robot(ip_addr, franka::RealtimeConfig::kIgnore), gripper(ip_addr) {
         // Clear any pre-existing error state left over from a previous run
         try {
             robot.automaticErrorRecovery();
