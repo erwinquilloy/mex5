@@ -1,7 +1,7 @@
-"""CLI entrypoint.
+"""Legacy CLI entrypoint (cartesian-delta runner; superseded by run_droid_benchmark.py).
 
 Examples:
-    # full LIBERO-style subset, 5 trials each
+    # full spatial+goal subset, 5 trials each
     python -m benchmarks.scripts.run_benchmark
 
     # one task, dry run with file camera, no human-in-the-loop success
@@ -22,7 +22,7 @@ from benchmarks.benchmark.runner import run_benchmark
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--tasks", nargs="*", default=None,
-                    help="task ids; defaults to all (LIBERO subset)")
+                    help="task ids; defaults to all (spatial + goal subsets)")
     ap.add_argument("--trials", type=int, default=5)
     ap.add_argument("--franka-ip", default="192.168.2.1")
     ap.add_argument("--franka-port", type=int, default=34568)

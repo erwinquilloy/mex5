@@ -1,78 +1,10 @@
 # MolmoAct2 on Franka Emika — Benchmark
 
-End-to-end harness for evaluating **MolmoAct2** on a Franka Research robot.
-Two evaluation paths share a common metrics schema (`benchmark/metrics.py`):
+End-to-end harness for evaluating **MolmoAct2** on a Franka Research robot:
 
 | Path | Model | Where it runs | Auto-scored? | Purpose |
 |---|---|---|---|---|
-| **DROID real-robot** (`scripts/run_droid_benchmark.py`) | `allenai/MolmoAct2-DROID` | upstream `host_server_droid.py` on HPC + tunnel + workstation client | no (human grader) | **Primary**: Table 6 reproduction of arXiv:2605.02881 (the course exercise target) |
-| **LIBERO sim** (`scripts/run_libero_benchmark.py`) | `allenai/MolmoAct2-LIBERO` | one Python process on the HPC GPU (in-process, no HTTP) | yes (`env.check_success()`) | Smoke test / debug — fast suite-wide success numbers without a robot |
-
-Current focus: **DROID real-robot** for the Table 6 zero-shot replication. The
-LIBERO sim path remains useful for fast smoke testing of the model + harness.
-
-## Sim path (LIBERO + MolmoAct2-LIBERO)
-
-```
-HPC A100 (one Python process)
-  ├── allenai/MolmoAct2-LIBERO  (loaded in-process via transformers)
-  └── robosuite/MuJoCo Franka   (LIBERO env, agentview + wrist cameras)
-        ↑                          │
-        └── env.step(action[7]) ◄──┘  predict_action -> actions[N,7]
-```
-
-### HPC setup
-
-```bash
-# clone + LIBERO + sim deps + model deps -- all in one env
-cd ~
-git clone https://github.com/Lifelong-Robot-Learning/LIBERO.git
-git clone https://github.com/erwinquilloy/mex5.git
-
-# use the upstream MolmoAct2 venv (uv-managed, has the right transformers pin)
-# OR: a fresh conda env -- avoid mixing with the broken `cached_path` env from earlier
-conda create -n molmoact2-libero python=3.10 -y && conda activate molmoact2-libero
-pip install -U "transformers>=4.46" "huggingface_hub>=0.24" "accelerate>=0.34" torch
-pip install -r ~/mex5/benchmarks/requirements.txt
-pip install -r ~/mex5/benchmarks/requirements_sim.txt
-pip install -e ~/LIBERO
-
-export MUJOCO_GL=egl
-export HF_HOME=$HOME/hf-cache
-mkdir -p $HF_HOME
-```
-
-### Run on the HPC GPU
-
-```bash
-conda activate molmoact2-libero        # required -- (base) is missing the deps
-cd ~/mex5
-export CUDA_VISIBLE_DEVICES=3          # pick a free GPU on the node (nvidia-smi to check)
-
-# list tasks in a suite (no model load -- fast)
-python -m benchmarks.scripts.run_libero_benchmark --list libero_spatial
-
-# smoke test: one task, one trial -- validates model + env wire end-to-end
-python -m benchmarks.scripts.run_libero_benchmark \
-    --suite libero_spatial --tasks 0 --trials 1
-
-# full libero_spatial suite (10 tasks x 5 trials)
-python -m benchmarks.scripts.run_libero_benchmark --suite libero_spatial --trials 5
-
-# all four "main" LIBERO suites, 5 trials each
-for s in libero_spatial libero_object libero_goal libero_10; do
-  python -m benchmarks.scripts.run_libero_benchmark --suite $s --trials 5
-done
-```
-
-Common stumbles:
-- `ModuleNotFoundError: No module named 'benchmarks'` → you're not in `~/mex5`, or you forgot `conda activate molmoact2-libero`.
-- Crash inside `LiberoEnv.reset()` about `task_id=` kwarg, or `np.asarray(...)` on a CUDA tensor → pull latest; both fixed in `54533a3`.
-
-Results stream into `benchmarks/results/<run_id>.json` after every trial. The
-final stdout block prints overall success rate, per-task success rate, and
-inference / e2e latency p50/p95/p99 — directly comparable to the DROID real-robot
-numbers later.
+| **DROID real-robot** (`scripts/run_droid_benchmark.py`) | `allenai/MolmoAct2-DROID` | upstream `host_server_droid.py` on HPC + tunnel + workstation client | no (human grader) | Table 6 reproduction of arXiv:2605.02881 (the course exercise target) |
 
 ## Topology (DROID path)
 
@@ -285,8 +217,8 @@ curl http://localhost:8000/act      # expect {"status": "ok", "repo_id": "...", 
 Common env vars first:
 
 ```bash
-conda activate molmoact2-libero     # or whichever env has the workstation deps
 cd ~/mex5
+# activate whichever conda/venv has the workstation deps installed
 export FRANKA_BENCH_EXT_INDEX=0
 # optional: export FRANKA_BENCH_WRIST_SERIAL=<D457 serial>
 ```
@@ -383,16 +315,13 @@ benchmarks/
     droid_tasks.py                     Table 6 task suite (5 tasks, paper success rates)
     droid_runner.py                    capture -> infer -> exec loop (transport-agnostic)
     metrics.py                         per-step record + p50/p95/p99 summaries
-    libero_env.py                      LIBERO sim env (smoke-test path)
-    sim_runner.py                      LIBERO loop
-    molmoact_client.py                 (legacy /predict client; LIBERO path only)
+    molmoact_client.py                 (legacy /predict client; unused)
     franka_client.py                   delta-cartesian REST client (used by legacy runner.py)
     camera.py                          (legacy single-camera; unused for DROID path)
-    tasks.py                           (legacy LIBERO-style real-robot tasks)
+    tasks.py                           (legacy spatial/goal task suite for the legacy runner)
     runner.py                          (legacy real-robot runner using motion_server)
   scripts/
     run_droid_benchmark.py             PRIMARY: Table 6 zero-shot eval (--transport {fci,rest,mcp})
-    run_libero_benchmark.py            sim smoke test
     compare_runs.py                    side-by-side table across N result JSONs
     run_benchmark.py                   legacy
   results/                             per-run JSON dumps
@@ -401,14 +330,15 @@ benchmarks/
 ## What the legacy files are
 
 The first version of this harness assumed a custom inference server we'd write
-(`benchmark/molmoact_client.py`, `serve_molmoact2.py`) and a cartesian REST
-action interface (`benchmark/franka_client.py`). After reading the MolmoAct2
-model card and Allen AI's repo, we pivoted to:
+(`benchmark/molmoact_client.py`) and a cartesian REST action interface
+(`benchmark/franka_client.py`). After reading the MolmoAct2 model card and
+Allen AI's repo, we pivoted to:
 - upstream `host_server_droid.py` for serving (correct schema, json_numpy)
 - `panda_py` for action exec (DROID uses joint targets, not cartesian)
 
-The legacy modules are retained because the LIBERO sim path may still use them
-in future work, and they document the API of the underlying C++ motion server.
+The legacy modules are retained because they document the API of the
+underlying C++ motion server and `franka_client.py` is still useful as a
+thin REST client for ad-hoc moves.
 
 The REST/MCP transports added later go through the same `motion_server` but
 bridge the joint-vs-cartesian gap by FK-ing each model row locally before

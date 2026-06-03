@@ -1,14 +1,16 @@
-"""LIBERO-style task suite adapted for the real Franka.
+"""Legacy task suite for the cartesian-delta runner (benchmarks/runner.py).
 
-LIBERO has four suites. We mirror two on physical hardware:
-  - libero_spatial : same objects, different spatial relations
-  - libero_goal    : same objects/positions, different goals
+Two task families on physical hardware:
+  - spatial : same objects, different spatial relations
+  - goal    : same objects/positions, different goals
 
 Each Task carries the natural-language instruction passed to MolmoAct2, plus
 a `verify` callback the human operator answers via the CLI (success/fail).
 
 Object/landmark coordinates are placeholders -- tune to your tabletop layout
 (meters, robot base frame) before running.
+
+The primary DROID Table 6 suite lives in droid_tasks.py.
 """
 from __future__ import annotations
 
@@ -30,7 +32,7 @@ class Task:
     max_steps: int = MAX_STEPS
 
 
-# --- LIBERO-Spatial (same objects, different spatial relations) -----------
+# --- Spatial (same objects, different spatial relations) -----------------
 SPATIAL: list[Task] = [
     Task("spatial_red_left",  "spatial",
          "pick up the red block on the left of the table",
@@ -46,7 +48,7 @@ SPATIAL: list[Task] = [
          "Mirror of spatial_red_front."),
 ]
 
-# --- LIBERO-Goal (same scene, different goals) ----------------------------
+# --- Goal (same scene, different goals) ----------------------------------
 GOAL: list[Task] = [
     Task("goal_block_in_bin", "goal",
          "put the red block in the white bin",
