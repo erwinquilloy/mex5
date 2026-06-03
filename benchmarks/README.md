@@ -299,6 +299,38 @@ pipette_in_tray                  86.7%    66.7%   15
 ...
 ```
 
+## Manual homing
+
+The runner auto-homes at the start of every trial, so you don't normally need
+these. Use them between sessions or when the arm is parked somewhere awkward
+after a debug run.
+
+**FCI** (motion_server must be stopped):
+
+```bash
+FRANKA_HOST=192.168.1.131 python -c "from benchmarks.benchmark.panda_driver import PandaDriver; PandaDriver().home()"
+```
+
+**REST** — either restart motion_server (its `initialize()` calls `goHome`,
+joint-space, exactly the upstream behavior):
+
+```bash
+# Ctrl-C the running motion_server, then re-run it:
+cd franka/cpp/build && ./motion_server
+```
+
+…or POST via the driver (faster; cartesian-interpolated to FK'd home):
+
+```bash
+FRANKA_REST_HOST=192.168.2.1 python -c "from benchmarks.benchmark.franka_rest_driver import FrankaRestDriver; FrankaRestDriver().home()"
+```
+
+**MCP** — same two options. Restart motion_server (MCP fans through it), or:
+
+```bash
+FRANKA_MCP_URL=http://<mcp host>:8085/franka python -c "from benchmarks.benchmark.franka_mcp_driver import FrankaMcpDriver; FrankaMcpDriver().home()"
+```
+
 ## Layout
 
 ```
