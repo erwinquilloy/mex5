@@ -202,31 +202,117 @@ streams — there's a Flask dashboard that replaces the CLI prompts:
   motion_server must be stopped to switch to FCI, running to switch to
   REST/MCP).
 
-### Launching
+### Launching the dashboard
 
 The dashboard owns the cameras, so **stop `run_droid_benchmark.py` first** —
-both can't open the RealSense at the same time. Same env vars as the CLI:
+both can't open the RealSense at the same time. It also needs the same
+upstream pieces as the CLI runner (model server + tunnel, plus motion_server
+/ mcp_server for the REST and MCP transports respectively).
+
+**Prerequisites checklist** (only what your chosen transport needs):
+
+- [ ] `host_server_droid.py` running on the HPC, port 8000
+- [ ] SSH tunnel up: `ssh -N -L 8000:localhost:8000 <hpc>` (and `curl http://localhost:8000/act` returns ok)
+- [ ] Cameras connected (RealSense D457 wrist + USB webcam external)
+- [ ] CLI runner stopped (`pkill -f run_droid_benchmark` if you're not sure)
+- [ ] **FCI only:** robot in white/unlocked state, FCI activated, motion_server **stopped**
+- [ ] **REST only:** motion_server running (see the rebuild + launch steps below)
+- [ ] **MCP only:** motion_server running, **and** mcp_server.py running
+
+Common env vars (cameras):
 
 ```bash
 cd ~/mex5
 export FRANKA_BENCH_EXT_INDEX=0
-# pick one (or set several; precedence above picks the default)
-export FRANKA_MCP_URL=http://<mcp host>:8085/franka
-# export FRANKA_REST_HOST=<motion_server IP>
-# export FRANKA_HOST=192.168.1.131
+# optional: export FRANKA_BENCH_WRIST_SERIAL=<D457 serial>
+# optional: export FRANKA_BENCH_DEPTH_MAX_M=2.0          # depth colormap range
+```
 
-python -m benchmarks.scripts.serve_dashboard --port 8080 --molmoact-url http://localhost:8000
+Then pick one of the three launches.
+
+#### Launch (FCI)
+
+```bash
+export FRANKA_HOST=192.168.1.131
+export FRANKA_USER=...
+export FRANKA_PASS=...
+python -m benchmarks.scripts.serve_dashboard \
+    --port 8080 --molmoact-url http://localhost:8000
 ```
 
 One-liner:
 ```bash
-FRANKA_BENCH_EXT_INDEX=0 FRANKA_MCP_URL=http://<mcp host>:8085/franka python -m benchmarks.scripts.serve_dashboard --port 8080 --molmoact-url http://localhost:8000
+FRANKA_BENCH_EXT_INDEX=0 FRANKA_HOST=192.168.1.131 FRANKA_USER=... FRANKA_PASS=... python -m benchmarks.scripts.serve_dashboard --port 8080 --molmoact-url http://localhost:8000
 ```
 
-Then open `http://<workstation-ip>:8080/`.
+#### Launch (REST)
 
-Override the autodetected transport with `--transport fci|rest|mcp` on the
-command line, or via the dropdown after launch.
+```bash
+# in another terminal on the motion_server host:
+cd ~/mex5/franka/cpp/build && ./motion_server
+
+# in the dashboard terminal:
+export FRANKA_REST_HOST=192.168.2.1
+python -m benchmarks.scripts.serve_dashboard \
+    --port 8080 --molmoact-url http://localhost:8000 \
+    --rest-step-time-s 2.5
+```
+
+One-liner:
+```bash
+FRANKA_BENCH_EXT_INDEX=0 FRANKA_REST_HOST=192.168.2.1 python -m benchmarks.scripts.serve_dashboard --port 8080 --molmoact-url http://localhost:8000 --rest-step-time-s 2.5
+```
+
+#### Launch (MCP)
+
+```bash
+# terminal A (motion_server host):
+cd ~/mex5/franka/cpp/build && ./motion_server
+
+# terminal B (mcp_server host):
+cd ~/mex5/franka/python && python3 mcp_server.py
+
+# terminal C (dashboard):
+export FRANKA_MCP_URL=http://<mcp host>:8085/franka
+python -m benchmarks.scripts.serve_dashboard \
+    --port 8080 --molmoact-url http://localhost:8000 \
+    --rest-step-time-s 2.5
+```
+
+One-liner:
+```bash
+FRANKA_BENCH_EXT_INDEX=0 FRANKA_MCP_URL=http://<mcp host>:8085/franka python -m benchmarks.scripts.serve_dashboard --port 8080 --molmoact-url http://localhost:8000 --rest-step-time-s 2.5
+```
+
+#### Using the dashboard
+
+1. Open `http://<workstation-ip>:8080/` in a browser.
+2. Confirm all three video tiles are live (external, wrist RGB, wrist
+   depth). If the depth tile stays black, the RealSense depth stream
+   isn't starting — check `FRANKA_BENCH_WRIST_SERIAL` and that the
+   D457 USB-C switch is set per `franka/README.md`.
+3. The status line at the bottom shows the auto-detected transport. To
+   switch, pick a different option in the dropdown (the underlying
+   constraints in the prerequisites still apply — switching to FCI while
+   motion_server is running will fail loudly).
+4. Click **home** to reset the arm.
+5. Type an instruction (e.g. *"pick up the apple and put it on the plate"*),
+   click **run one chunk**. The dashboard captures, runs inference, and
+   executes the returned action chunk. Click again to keep going.
+
+Stop the dashboard with Ctrl-C in its terminal; it closes the driver and
+releases the cameras.
+
+#### Useful flags
+
+| Flag | Default | What it does |
+|---|---|---|
+| `--port` | `8080` | dashboard HTTP port |
+| `--molmoact-url` | `http://localhost:8000` | MolmoAct2-DROID server |
+| `--transport {fci,rest,mcp}` | autodetect | override env-var selection |
+| `--rest-step-time-s` | `2.5` | per-row REST move time (REST/MCP only) |
+| `--exec-rows` | `3` | rows of each chunk to run when the policy is in fine-refinement mode |
+| `--mjpeg-fps` | `10.0` | dashboard refresh rate |
 
 ### Dashboard vs CLI runner
 
