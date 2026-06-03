@@ -124,6 +124,11 @@ python -m benchmarks.scripts.run_droid_benchmark
 python -m benchmarks.scripts.run_droid_benchmark --tasks apple_on_plate --trials 1
 ```
 
+One-liner (smoke test):
+```bash
+FRANKA_HOST=192.168.1.131 FRANKA_USER=... FRANKA_PASS=... python -m benchmarks.scripts.run_droid_benchmark --tasks apple_on_plate --trials 1
+```
+
 #### REST (motion_server)
 
 ```bash
@@ -133,6 +138,11 @@ python -m benchmarks.scripts.run_droid_benchmark \
     --tasks apple_on_plate --trials 1
 ```
 
+One-liner:
+```bash
+FRANKA_REST_HOST=192.168.2.1 python -m benchmarks.scripts.run_droid_benchmark --transport rest --rest-step-time-s 2.5 --tasks apple_on_plate --trials 1
+```
+
 #### MCP (fastmcp → motion_server)
 
 ```bash
@@ -140,6 +150,11 @@ export FRANKA_MCP_URL=http://<mcp-host>:8085/franka
 python -m benchmarks.scripts.run_droid_benchmark \
     --transport mcp --rest-step-time-s 2.5 \
     --tasks apple_on_plate --trials 1
+```
+
+One-liner:
+```bash
+FRANKA_MCP_URL=http://<mcp-host>:8085/franka python -m benchmarks.scripts.run_droid_benchmark --transport mcp --rest-step-time-s 2.5 --tasks apple_on_plate --trials 1
 ```
 
 `FRANKA_HOST` is **only** the FCI path; REST/MCP each have their own variable
@@ -158,6 +173,11 @@ python -m benchmarks.scripts.compare_runs \
     benchmarks/results/droid-rest-run.json \
     benchmarks/results/droid-mcp-run.json \
     --label fci --label rest --label mcp
+```
+
+One-liner (labelled):
+```bash
+python -m benchmarks.scripts.compare_runs benchmarks/results/droid-fci-run.json benchmarks/results/droid-rest-run.json benchmarks/results/droid-mcp-run.json --label fci --label rest --label mcp
 ```
 
 Prints overall success, per-task success (cell shows `pct (n_trials)`), and
@@ -187,6 +207,11 @@ mkdir -p build && cd build
 cmake ..
 make
 ./motion_server     # binds 0.0.0.0:34568, prompts before homing
+```
+
+One-liner:
+```bash
+cd ~/mex5/franka/cpp && mkdir -p build && cd build && cmake .. && make && ./motion_server
 ```
 
 Note the IP this box has on the lab network — that's `FRANKA_REST_HOST` below.
@@ -234,6 +259,11 @@ python -m benchmarks.scripts.run_droid_benchmark \
     --transport fci --tasks apple_on_plate --trials 1
 ```
 
+One-liner:
+```bash
+FRANKA_HOST=192.168.1.131 FRANKA_USER=... FRANKA_PASS=... python -m benchmarks.scripts.run_droid_benchmark --transport fci --tasks apple_on_plate --trials 1
+```
+
 **4b. REST** — start motion_server (step 1) in another terminal first:
 
 ```bash
@@ -242,6 +272,11 @@ export FRANKA_REST_HOST=<motion_server IP>  # repo default in clients: 192.168.2
 python -m benchmarks.scripts.run_droid_benchmark \
     --transport rest --rest-step-time-s 2.5 \
     --tasks apple_on_plate --trials 1
+```
+
+One-liner:
+```bash
+unset FRANKA_HOST; FRANKA_REST_HOST=<motion_server IP> python -m benchmarks.scripts.run_droid_benchmark --transport rest --rest-step-time-s 2.5 --tasks apple_on_plate --trials 1
 ```
 
 **4c. MCP** — motion_server **and** mcp_server both running:
@@ -256,6 +291,14 @@ export FRANKA_MCP_URL=http://<mcp host>:8085/franka
 python -m benchmarks.scripts.run_droid_benchmark \
     --transport mcp --rest-step-time-s 2.5 \
     --tasks apple_on_plate --trials 1
+```
+
+One-liners:
+```bash
+# third terminal (mcp_server):
+cd ~/mex5/franka/python && python3 mcp_server.py
+# benchmark terminal:
+FRANKA_MCP_URL=http://<mcp host>:8085/franka python -m benchmarks.scripts.run_droid_benchmark --transport mcp --rest-step-time-s 2.5 --tasks apple_on_plate --trials 1
 ```
 
 ### 5. Compare
