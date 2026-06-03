@@ -232,6 +232,128 @@ Prints overall success, per-task success (cell shows `pct (n_trials)`), and
 mean/p50/p95 for `infer_server_ms` / `e2e_ms` / `motion_rest_ms` per column.
 The motion_rest jump from FCI to REST/MCP is where the transport overhead lives.
 
+## End-to-end walkthrough (Linux workstation, fresh shell)
+
+Step-by-step recipe to bring everything up and run all three transports back
+to back, then compare. Use this as a checklist when you sit down at the rig.
+
+### 0. Pull latest
+
+```bash
+cd ~/mex5
+git pull --ff-only origin main      # should land at 3c6f40e or later
+```
+
+### 1. Rebuild motion_server (REST/MCP only — skip if FCI-only)
+
+On the host that runs motion_server (the one with libfranka). If it's a
+different box from the workstation, SSH in first.
+
+```bash
+cd ~/mex5/franka/cpp
+mkdir -p build && cd build
+cmake ..
+make
+./motion_server     # binds 0.0.0.0:34568, prompts before homing
+```
+
+Note the IP this box has on the lab network — that's `FRANKA_REST_HOST` below.
+
+### 2. Install fastmcp (MCP only)
+
+On the workstation (benchmark client) **and** on the host where you'll run
+`mcp_server.py`:
+
+```bash
+pip install fastmcp
+```
+
+### 3. Model server + tunnel (all transports)
+
+```bash
+# HPC side (tmux / screen):
+cd ~/molmoact2 && uv run python examples/droid/host_server_droid.py \
+    --host 0.0.0.0 --port 8000 --dtype bfloat16
+
+# workstation:
+ssh -N -L 8000:localhost:8000 erwin.quilloy@ai-n002.hpc.coe.upd.edu.ph &
+curl http://localhost:8000/act      # expect {"status": "ok", "repo_id": "...", ...}
+```
+
+### 4. Smoke-test each transport (one task, one trial each)
+
+Common env vars first:
+
+```bash
+conda activate molmoact2-libero     # or whichever env has the workstation deps
+cd ~/mex5
+export FRANKA_BENCH_EXT_INDEX=0
+# optional: export FRANKA_BENCH_WRIST_SERIAL=<D457 serial>
+```
+
+**4a. FCI** — motion_server must be **stopped** (it would hold FCI exclusively):
+
+```bash
+# Ctrl-C motion_server in its terminal first
+export FRANKA_HOST=192.168.1.131            # robot FCI IP
+export FRANKA_USER=...
+export FRANKA_PASS=...
+python -m benchmarks.scripts.run_droid_benchmark \
+    --transport fci --tasks apple_on_plate --trials 1
+```
+
+**4b. REST** — start motion_server (step 1) in another terminal first:
+
+```bash
+unset FRANKA_HOST                           # avoid confusion
+export FRANKA_REST_HOST=<motion_server IP>  # repo default in clients: 192.168.2.1
+python -m benchmarks.scripts.run_droid_benchmark \
+    --transport rest --rest-step-time-s 2.5 \
+    --tasks apple_on_plate --trials 1
+```
+
+**4c. MCP** — motion_server **and** mcp_server both running:
+
+```bash
+# third terminal:
+cd ~/mex5/franka/python
+python3 mcp_server.py                       # 0.0.0.0:8085/franka
+
+# back in the benchmark terminal:
+export FRANKA_MCP_URL=http://<mcp host>:8085/franka
+python -m benchmarks.scripts.run_droid_benchmark \
+    --transport mcp --rest-step-time-s 2.5 \
+    --tasks apple_on_plate --trials 1
+```
+
+### 5. Compare
+
+```bash
+ls -lt benchmarks/results/ | head -5
+python -m benchmarks.scripts.compare_runs benchmarks/results/*.json
+```
+
+The three latest files are FCI / REST / MCP; each column header tags its
+transport (`fci:...`, `rest:...`, `mcp:...`). Motion overhead shows up in
+`motion_rest_ms`.
+
+### Common bites
+
+- **Wrong host for REST/MCP.** `192.168.1.131` is FCI; `192.168.2.1` is what
+  the repo's existing clients use for motion_server. The driver no longer
+  falls back from `FRANKA_HOST` — wrong env → loud error with a hint.
+- **Both endpoints up at once.** motion_server holds FCI exclusively; FCI
+  runs will fail until you Ctrl-C motion_server.
+- **`readJointState` empty / 8-vec missing.** You didn't rebuild
+  motion_server from the patched source. The Python driver raises a clear
+  "did you rebuild motion_server?" error pointing here.
+- **MCP `readJointState` empty even after rebuild.** Means your installed
+  `fastmcp` version returns a `call_tool` result shape `_unwrap` in
+  `franka_mcp_driver.py` doesn't recognize. Run `franka/python/mcp_client.py`
+  manually and paste the `response` repr — one extra branch fixes it.
+- **REST per-row time clamps.** Server enforces `tf ∈ [0.5, ∞)`; below 0.5 s
+  is silently floored. Above 5 s is fine.
+
 The runner prompts you per-trial to set up the scene + randomize the external
 camera, then asks for the success grade after each trial. Results stream to
 `benchmarks/results/<run_id>.json` after every trial (crash-safe). At the end
