@@ -1,6 +1,6 @@
 """Interactive web dashboard for the MolmoAct2-DROID rig.
 
-Shows live RealSense RGB + depth + external webcam streams, a "Home" button,
+Shows live external webcam + wrist RealSense RGB streams, a "Home" button,
 and a task-instruction input that runs one inference->exec cycle per click.
 Auto-detects the robot transport (fci / rest / mcp) from env vars; a UI
 dropdown lets you switch without restarting.
@@ -167,7 +167,7 @@ _INDEX_HTML = """<!doctype html>
   body { font-family: ui-sans-serif, system-ui, sans-serif; background:#111; color:#eee;
          margin:0; padding:1.5rem; }
   h1 { font-size:1.2rem; margin:0 0 1rem; }
-  .grid { display:grid; grid-template-columns: repeat(3, minmax(260px, 1fr)); gap:1rem; }
+  .grid { display:grid; grid-template-columns: repeat(2, minmax(300px, 1fr)); gap:1rem; }
   .tile { background:#1c1c1c; border:1px solid #2a2a2a; border-radius:8px; padding:0.6rem; }
   .tile h2 { font-size:0.85rem; margin:0 0 0.4rem; color:#9ad; font-weight:600; }
   .tile img { width:100%; height:auto; background:#000; border-radius:4px; display:block; }
@@ -196,7 +196,6 @@ _INDEX_HTML = """<!doctype html>
 <div class="grid">
   <div class="tile"><h2>external (tripod)</h2><img src="/stream/ext"></div>
   <div class="tile"><h2>wrist RGB (D457)</h2><img src="/stream/wrist_rgb"></div>
-  <div class="tile"><h2>wrist depth (jet, &le;<span id="depthmax">2.0</span> m)</h2><img src="/stream/wrist_depth"></div>
 </div>
 
 <div class="controls">
@@ -306,10 +305,6 @@ def make_app(state: DashboardState, fps: float = 10.0) -> Flask:
     @app.route("/stream/wrist_rgb")
     def stream_wrist_rgb():
         return _stream(lambda: state.camera.latest_jpegs()[1])
-
-    @app.route("/stream/wrist_depth")
-    def stream_wrist_depth():
-        return _stream(lambda: state.camera.latest_jpegs()[2])
 
     @app.route("/api/status")
     def api_status():

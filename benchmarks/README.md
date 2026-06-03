@@ -189,8 +189,9 @@ The motion_rest jump from FCI to REST/MCP is where the transport overhead lives.
 For ad-hoc driving — type an instruction, see what the model does, watch the
 streams — there's a Flask dashboard that replaces the CLI prompts:
 
-- Three live MJPEG tiles: external webcam, wrist RealSense RGB, wrist
-  RealSense **depth** (COLORMAP_JET, capped at 2 m by default).
+- Two live MJPEG tiles: external webcam, wrist RealSense RGB. (The
+  model is RGB-only; depth was removed since it was display-only and
+  unused by inference.)
 - **Home** button → calls `driver.home()` on whichever transport is active.
 - **Instruction input + Run** button → one inference→exec cycle per click
   (capture → MolmoAct2 → execute the returned chunk). Click again to keep
@@ -225,7 +226,6 @@ Common env vars (cameras):
 cd ~/mex5
 export FRANKA_BENCH_EXT_INDEX=0
 # optional: export FRANKA_BENCH_WRIST_SERIAL=<D457 serial>
-# optional: export FRANKA_BENCH_DEPTH_MAX_M=2.0          # depth colormap range
 
 # External-cam orientation. Canonical DROID is camera behind+above the robot;
 # if your tripod is in front looking back at the robot, robot +Y appears as
@@ -294,10 +294,9 @@ FRANKA_BENCH_EXT_INDEX=0 FRANKA_MCP_URL=http://<mcp host>:8085/franka python -m 
 #### Using the dashboard
 
 1. Open `http://<workstation-ip>:8080/` in a browser.
-2. Confirm all three video tiles are live (external, wrist RGB, wrist
-   depth). If the depth tile stays black, the RealSense depth stream
-   isn't starting — check `FRANKA_BENCH_WRIST_SERIAL` and that the
-   D457 USB-C switch is set per `franka/README.md`.
+2. Confirm both video tiles are live (external, wrist RGB). If wrist RGB
+   stays black, check `FRANKA_BENCH_WRIST_SERIAL` and that the D457
+   USB-C switch is set per `franka/README.md`.
 3. The status line at the bottom shows the auto-detected transport. To
    switch, pick a different option in the dropdown (the underlying
    constraints in the prerequisites still apply — switching to FCI while
@@ -326,7 +325,7 @@ releases the cameras.
 | Need | Use |
 |---|---|
 | Quick "type and try" with one instruction | dashboard |
-| Watch depth in real time | dashboard (CLI runner doesn't stream depth) |
+| Live camera streams in a browser | dashboard |
 | Reproduce Table 6 with N trials, per-task scoring, results JSON | CLI runner |
 | Auto-home between trials with operator-graded success | CLI runner |
 
@@ -533,7 +532,7 @@ benchmarks/
   hpc/README.md                        HPC server setup (upstream host_server_droid.py)
   benchmark/
     dual_camera.py                     wrist (RealSense color) + external (UVC) capture
-    dashboard_camera.py                wrist RealSense (color + depth) + webcam, background-threaded
+    dashboard_camera.py                wrist RealSense (color) + webcam, background-threaded
     panda_driver.py                    --transport=fci : panda_py joint-position streaming
     franka_rest_driver.py              --transport=rest: FK + motion_server REST
     franka_mcp_driver.py               --transport=mcp : fastmcp wrapper over the REST driver
