@@ -184,6 +184,63 @@ Prints overall success, per-task success (cell shows `pct (n_trials)`), and
 mean/p50/p95 for `infer_server_ms` / `e2e_ms` / `motion_rest_ms` per column.
 The motion_rest jump from FCI to REST/MCP is where the transport overhead lives.
 
+## Dashboard (interactive web UI)
+
+For ad-hoc driving — type an instruction, see what the model does, watch the
+streams — there's a Flask dashboard that replaces the CLI prompts:
+
+- Three live MJPEG tiles: external webcam, wrist RealSense RGB, wrist
+  RealSense **depth** (COLORMAP_JET, capped at 2 m by default).
+- **Home** button → calls `driver.home()` on whichever transport is active.
+- **Instruction input + Run** button → one inference→exec cycle per click
+  (capture → MolmoAct2 → execute the returned chunk). Click again to keep
+  going. No success grading, no result-file writes — use the CLI runner for
+  that.
+- Transport **dropdown**: auto-detected at startup from env vars (precedence
+  `FRANKA_MCP_URL > FRANKA_REST_HOST > FRANKA_HOST`); the dropdown lets you
+  switch without restarting (the underlying constraints still apply —
+  motion_server must be stopped to switch to FCI, running to switch to
+  REST/MCP).
+
+### Launching
+
+The dashboard owns the cameras, so **stop `run_droid_benchmark.py` first** —
+both can't open the RealSense at the same time. Same env vars as the CLI:
+
+```bash
+cd ~/mex5
+export FRANKA_BENCH_EXT_INDEX=0
+# pick one (or set several; precedence above picks the default)
+export FRANKA_MCP_URL=http://<mcp host>:8085/franka
+# export FRANKA_REST_HOST=<motion_server IP>
+# export FRANKA_HOST=192.168.1.131
+
+python -m benchmarks.scripts.serve_dashboard --port 8080 --molmoact-url http://localhost:8000
+```
+
+One-liner:
+```bash
+FRANKA_BENCH_EXT_INDEX=0 FRANKA_MCP_URL=http://<mcp host>:8085/franka python -m benchmarks.scripts.serve_dashboard --port 8080 --molmoact-url http://localhost:8000
+```
+
+Then open `http://<workstation-ip>:8080/`.
+
+Override the autodetected transport with `--transport fci|rest|mcp` on the
+command line, or via the dropdown after launch.
+
+### Dashboard vs CLI runner
+
+| Need | Use |
+|---|---|
+| Quick "type and try" with one instruction | dashboard |
+| Watch depth in real time | dashboard (CLI runner doesn't stream depth) |
+| Reproduce Table 6 with N trials, per-task scoring, results JSON | CLI runner |
+| Auto-home between trials with operator-graded success | CLI runner |
+
+The two share the same drivers (`PandaDriver` / `FrankaRestDriver` /
+`FrankaMcpDriver`) and the same `DroidClient`, so model+transport behavior is
+identical — the dashboard is just an interactive shell around them.
+
 ## End-to-end walkthrough (Linux workstation, fresh shell)
 
 Step-by-step recipe to bring everything up and run all three transports back
@@ -382,10 +439,12 @@ benchmarks/
   requirements.txt                     workstation deps
   hpc/README.md                        HPC server setup (upstream host_server_droid.py)
   benchmark/
-    dual_camera.py                     wrist (RealSense) + external (UVC) capture
+    dual_camera.py                     wrist (RealSense color) + external (UVC) capture
+    dashboard_camera.py                wrist RealSense (color + depth) + webcam, background-threaded
     panda_driver.py                    --transport=fci : panda_py joint-position streaming
     franka_rest_driver.py              --transport=rest: FK + motion_server REST
     franka_mcp_driver.py               --transport=mcp : fastmcp wrapper over the REST driver
+    transport.py                       autodetect_transport() + make_driver(transport, ...)
     molmoact_droid_client.py           POST /act with json_numpy
     droid_tasks.py                     Table 6 task suite (5 tasks, paper success rates)
     droid_runner.py                    capture -> infer -> exec loop (transport-agnostic)
@@ -397,6 +456,8 @@ benchmarks/
     runner.py                          (legacy real-robot runner using motion_server)
   scripts/
     run_droid_benchmark.py             PRIMARY: Table 6 zero-shot eval (--transport {fci,rest,mcp})
+    serve_dashboard.py                 interactive web UI: streams + Home + task input
+    serve_live.py                      legacy passive MJPEG viewer (reads tmpfs)
     compare_runs.py                    side-by-side table across N result JSONs
     run_benchmark.py                   legacy
   results/                             per-run JSON dumps

@@ -12,11 +12,9 @@ import numpy as np
 from . import live_view
 from .dual_camera import DualCamera, Frames, from_env as camera_from_env
 from .droid_tasks import DroidTask, all_tasks, by_id
-from .franka_mcp_driver import FrankaMcpDriver
-from .franka_rest_driver import FrankaRestDriver
 from .metrics import RunRecord, StepRecord, Stopwatch, TrialRecord
 from .molmoact_droid_client import DroidClient
-from .panda_driver import PandaDriver
+from .transport import make_driver
 
 log = logging.getLogger("bench.droid")
 
@@ -148,25 +146,18 @@ def run_droid_benchmark(
     log.info("server health: %s", health)
     log.info("live cam view: run `python -m benchmarks.scripts.serve_live` in another shell, then open http://<workstation-ip>:8080/")
 
-    if transport == "rest":
-        panda = FrankaRestDriver(
-            host=rest_host,
-            port=rest_port,
-            step_time_s=rest_step_time_s,
-        )
+    panda = make_driver(
+        transport,
+        fci_host=franka_host,
+        rest_host=rest_host,
+        rest_port=rest_port,
+        mcp_url=mcp_url,
+        step_time_s=rest_step_time_s,
+    )
+    if transport in ("rest", "mcp"):
         # On REST/MCP paths chunk_step_dt_s carries the per-row REST move
         # duration, not the FCI substep ramp interval.
         chunk_step_dt_s = rest_step_time_s
-    elif transport == "mcp":
-        panda = FrankaMcpDriver(
-            mcp_url=mcp_url,
-            step_time_s=rest_step_time_s,
-        )
-        chunk_step_dt_s = rest_step_time_s
-    elif transport == "fci":
-        panda = PandaDriver(hostname=franka_host)
-    else:
-        raise ValueError(f"unknown transport: {transport!r} (expected 'fci', 'rest', or 'mcp')")
     camera = camera_from_env()
 
     tasks = [by_id(t) for t in task_ids] if task_ids else all_tasks()
