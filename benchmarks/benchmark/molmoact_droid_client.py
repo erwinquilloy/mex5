@@ -53,7 +53,7 @@ class DroidClient:
         instruction: str,
         state: np.ndarray,
         num_steps: int = 10,
-        enable_cuda_graph: bool = True,
+        enable_cuda_graph: bool = False,
     ) -> DroidPrediction:
         if external_cam.dtype != np.uint8 or wrist_cam.dtype != np.uint8:
             raise ValueError("cameras must be uint8 RGB")
