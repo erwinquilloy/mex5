@@ -76,7 +76,12 @@ class DroidClient:
             timeout=self.timeout_s,
         )
         rtt = (time.perf_counter() - t0) * 1000.0
-        r.raise_for_status()
+        if not r.ok:
+            raise RuntimeError(
+                f"server {r.status_code} on /act: {r.text[:500]} "
+                f"(sent ext={external_cam.shape}, wrist={wrist_cam.shape}, "
+                f"state={state.shape})"
+            )
         body = json_numpy.loads(r.content)
         if "error" in body:
             raise RuntimeError(f"server error: {body['error']}")
