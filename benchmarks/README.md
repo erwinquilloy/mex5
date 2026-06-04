@@ -97,8 +97,10 @@ curl http://localhost:8000/act    # confirm: {"status": "ok", "repo_id": "...", 
 
 Workspace prep:
 - Wrist D457 mounted, USB-C / FAKRA switch set per `franka/README.md`.
-- External USB webcam plugged in. Find its index with `ls /dev/video*` (use the
-  number after `video`, e.g. `/dev/video0` → `0`).
+- External USB webcam plugged in. The RealSense also registers as
+  `/dev/video*`, so a bare `ls /dev/video*` is misleading. Use
+  `v4l2-ctl --list-devices` and pick the index that's *not* under
+  "Intel RealSense" (on `airscan4` this is currently index `6`).
 - Franka in white/unlocked state, FCI activated (see `franka/python/basic.py`).
 
 ### 3. Run
@@ -106,9 +108,29 @@ Workspace prep:
 Common env vars (cameras + model server):
 
 ```bash
-export FRANKA_BENCH_EXT_INDEX=0          # /dev/video0
+export FRANKA_BENCH_EXT_INDEX=6          # USB webcam (NOT the RealSense node)
+# RealSense D455 has no 256x256 mode; use a native resolution
+export FRANKA_BENCH_CAM_W=640
+export FRANKA_BENCH_CAM_H=480
 # optional: FRANKA_BENCH_WRIST_SERIAL=<D457 serial>  to pin the wrist cam
 ```
+
+#### Switching between FCI and REST
+
+`motion_server` and `panda_py` cannot share FCI — the protocol allows exactly
+one client. Switching transports is a kill-the-other-side ritual:
+
+- **FCI → REST.** Stop any benchmark first
+  (`pgrep -af run_droid_benchmark` should be empty), then launch
+  `motion_server` in its own terminal (`cd franka/cpp/build && ./motion_server`,
+  wait for `Listening at: http://0.0.0.0:34568`). Now run the benchmark with
+  `--transport rest`.
+- **REST → FCI.** Stop motion_server (Ctrl-C its terminal, or
+  `pkill -f motion_server`), confirm with `pgrep -af motion_server` (empty),
+  then run the benchmark without `--transport` (FCI is the default).
+
+If you forget and both clients try FCI, you'll see
+`libfranka: Connection timeout` from whichever starts second.
 
 #### FCI (default — direct libfranka)
 
@@ -131,16 +153,39 @@ FRANKA_HOST=192.168.2.100 FRANKA_USER=... FRANKA_PASS=... python -m benchmarks.s
 
 #### REST (motion_server)
 
+In one terminal, start motion_server:
+
+```bash
+cd franka/cpp/build && ./motion_server
+# wait for "Listening at: http://0.0.0.0:34568"; leave it running
+```
+
+In another terminal, run the benchmark:
+
 ```bash
 export FRANKA_REST_HOST=192.168.2.1      # the box running motion_server, NOT the robot
 python -m benchmarks.scripts.run_droid_benchmark \
-    --transport rest --rest-step-time-s 2.5 \
+    --transport rest --rest-step-time-s 2.0 \
     --tasks apple_on_plate --trials 1
+```
+
+`--rest-step-time-s` is the time motion_server interpolates each commanded
+EE pose over. Lower = faster but more reflex risk: at `0.5 s` a large
+per-step wrist roll (common on chunk 1) trips
+`cartesian_motion_generator_velocity_discontinuity` and motion_server
+returns 400. Start at `2.0`, then dial down toward `1.0` once you trust
+the loop. Quick health check before launching:
+
+```bash
+curl -m 3 -X POST http://192.168.2.1:34568/api/floats \
+     -H 'Content-Type: application/json' \
+     -d '{"readJointState":[]}'
+# expect JSON with 7+ joint angles
 ```
 
 One-liner:
 ```bash
-FRANKA_REST_HOST=192.168.2.1 python -m benchmarks.scripts.run_droid_benchmark --transport rest --rest-step-time-s 2.5 --tasks apple_on_plate --trials 1
+FRANKA_REST_HOST=192.168.2.1 python -m benchmarks.scripts.run_droid_benchmark --transport rest --rest-step-time-s 2.0 --tasks apple_on_plate --trials 1
 ```
 
 #### MCP (fastmcp → motion_server)
