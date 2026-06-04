@@ -2,16 +2,41 @@
 
 Drop-in alternative to PandaDriver: same public surface (home, state_vec8,
 send_chunk, close), but every robot interaction goes through the C++
-motion_server REST endpoints instead of opening libfranka directly.
+motion_server REST endpoints in `franka/cpp/motion_server.cpp`:
 
-The server speaks cartesian xyz + ZYX-Euler deltas in degrees; the DROID
-policy emits absolute joint positions. We bridge by FK-ing both the current
-and target joint vectors locally with panda_py, then sending the Euler delta.
-panda_py.fk is a pure-kinematics call (no FCI), so it coexists fine with the
-server's exclusive FCI session.
+    POST /api/floats  {"moveToCartesian":  [xf, yf, zf, tf, da, db, dg]}
+    POST /api/floats  {"closeGripper":     [width_m]}
+    POST /api/floats  {"openGripper":      [speed_m_s]}
+    POST /api/floats  {"readState":        []}      -> [x,y,z, alpha_deg, beta_deg, gamma_deg]
+    POST /api/floats  {"readJointState":   []}      -> [q0..q6, gripper_width]
 
-Requires the readJointState endpoint added to motion_server (returns
-[q0..q6, gripper_width]).
+Server semantics that drive this design:
+- `moveToCartesian` takes ABSOLUTE position (x, y, z) but DELTA orientation
+  (dα, dβ, dγ in degrees) added to whatever orientation the EE is at when
+  the move starts. The server clips each axis delta to ±90° silently — any
+  bigger request is dropped to 0°.
+- Motion time `tf` is clipped to a minimum of 0.5 s server-side.
+- Cartesian velocity/acceleration discontinuities trigger a libfranka reflex
+  that aborts the move; motion_server returns HTTP 400 with a
+  "collision_recovery:" prefix.
+
+The DROID policy emits ABSOLUTE joint positions. We bridge by FK-ing both
+the current and target joint vectors locally with panda_py, computing the
+shortest-arc Euler delta, then subdividing it across as many sequential
+moveToCartesian POSTs as needed to:
+  (a) keep each per-call axis delta below the server's ±90° clip, AND
+  (b) keep angular/linear velocity below safe thresholds so the reflex
+      doesn't fire.
+
+panda_py.fk is a pure-kinematics call (no FCI), so it coexists fine with
+the server's exclusive FCI session.
+
+Tunable via env vars (all optional):
+    FRANKA_BENCH_REST_MAX_DELTA_DEG     per-substep ceiling, default 45°
+                                        (server hard cap is 90°; we leave headroom)
+    FRANKA_BENCH_REST_MAX_OMEGA_DEG_S   per-axis max angular vel, default 45°/s
+    FRANKA_BENCH_REST_MAX_LIN_M_S       EE linear speed cap, default 0.25 m/s
+    FRANKA_BENCH_REST_MIN_STEP_TIME_S   minimum per-call tf, default 0.5 s
 """
 from __future__ import annotations
 
@@ -28,6 +53,11 @@ _HOME_Q = np.array([0., -np.pi/4, 0., -3*np.pi/4, 0., np.pi/2, np.pi/4], dtype=n
 _GRIPPER_MAX_M = 0.08
 _DEFAULT_REST_STEP_TIME_S = 2.5
 _DEFAULT_HOME_TIME_S = 3.0
+
+# Server-side hard limits, copied here so we don't post things the server will
+# silently drop.
+_SERVER_MAX_DELTA_DEG = 90.0
+_SERVER_MIN_STEP_TIME_S = 0.5
 
 
 @dataclass
@@ -56,6 +86,11 @@ def _zyx_euler_from_R(R: np.ndarray) -> tuple[float, float, float]:
     return alpha, beta, gamma
 
 
+def _wrap_deg(d: float) -> float:
+    """Wrap a degrees delta into (-180, 180] so we take the shortest arc."""
+    return (d + 180.0) % 360.0 - 180.0
+
+
 class FrankaRestDriver:
     def __init__(
         self,
@@ -76,6 +111,22 @@ class FrankaRestDriver:
         self._step_time_s = float(step_time_s)
         self._last_grip: Optional[bool] = None
 
+        # Subdivision guardrails — see module docstring.
+        self._max_delta_per_step_deg = min(
+            _SERVER_MAX_DELTA_DEG,
+            float(os.environ.get("FRANKA_BENCH_REST_MAX_DELTA_DEG", "45.0")),
+        )
+        self._max_omega_deg_s = float(
+            os.environ.get("FRANKA_BENCH_REST_MAX_OMEGA_DEG_S", "45.0")
+        )
+        self._max_lin_m_s = float(
+            os.environ.get("FRANKA_BENCH_REST_MAX_LIN_M_S", "0.25")
+        )
+        self._min_step_time_s = max(
+            _SERVER_MIN_STEP_TIME_S,
+            float(os.environ.get("FRANKA_BENCH_REST_MIN_STEP_TIME_S", str(_SERVER_MIN_STEP_TIME_S))),
+        )
+
         try:
             import panda_py  # noqa: F401
         except Exception as e:
@@ -87,12 +138,16 @@ class FrankaRestDriver:
     # ----- REST plumbing -----
 
     def _post(self, command: str, params: Sequence[float]) -> dict:
+        params_f = [float(x) for x in params]
         r = self._session.post(
             self._url,
-            json={command: [float(x) for x in params]},
+            json={command: params_f},
             timeout=self._timeout_s,
         )
-        r.raise_for_status()
+        if not r.ok:
+            raise RuntimeError(
+                f"motion_server {r.status_code} on {command}({params_f}): {r.text[:500]}"
+            )
         try:
             return r.json()
         except Exception:
@@ -116,29 +171,67 @@ class FrankaRestDriver:
         s = self.get_state()
         return np.concatenate([s.q, [s.gripper_width]], dtype=np.float32)
 
-    # ----- action chunk execution -----
+    # ----- planning -----
 
-    def _row_to_cartesian(
+    def _plan_substeps(
         self,
-        q_cur: np.ndarray,
-        q_target: np.ndarray,
+        x_c: float, y_c: float, z_c: float,
+        x_t: float, y_t: float, z_t: float,
+        a_c: float, b_c: float, g_c: float,
+        a_t: float, b_t: float, g_t: float,
+        t_sec: float,
         lock_down: bool,
-    ) -> tuple[float, float, float, float, float, float]:
-        import panda_py
-        T_cur = panda_py.fk(np.asarray(q_cur, dtype=np.float64))
-        T_tgt = panda_py.fk(np.asarray(q_target, dtype=np.float64))
-        x, y, z = (float(T_tgt[0, 3]), float(T_tgt[1, 3]), float(T_tgt[2, 3]))
+    ) -> list[tuple[float, float, float, float, float, float, float]]:
+        """Return a list of (xf, yf, zf, tf, da, db, dg) substeps.
+
+        - xyz interpolated linearly from current → target across n substeps.
+        - Euler deltas wrapped to shortest arc and split equally across n.
+        - n chosen so each substep's angular delta is ≤ max_delta_per_step_deg.
+        - Total time stretched if needed to keep angular and linear velocity
+          under the configured caps; per-substep tf is at least the server
+          minimum.
+        """
+        # angular deltas (degrees, shortest arc)
         if lock_down:
-            return x, y, z, 0.0, 0.0, 0.0
-        a_c, b_c, g_c = _zyx_euler_from_R(T_cur[:3, :3])
-        a_t, b_t, g_t = _zyx_euler_from_R(T_tgt[:3, :3])
-        d_alpha = math.degrees(a_t - a_c)
-        d_beta = math.degrees(b_t - b_c)
-        d_gamma = math.degrees(g_t - g_c)
-        d_alpha = max(-90.0, min(90.0, d_alpha))
-        d_beta = max(-90.0, min(90.0, d_beta))
-        d_gamma = max(-90.0, min(90.0, d_gamma))
-        return x, y, z, d_alpha, d_beta, d_gamma
+            da_total = db_total = dg_total = 0.0
+        else:
+            da_total = _wrap_deg(math.degrees(a_t - a_c))
+            db_total = _wrap_deg(math.degrees(b_t - b_c))
+            dg_total = _wrap_deg(math.degrees(g_t - g_c))
+
+        max_abs_angle = max(abs(da_total), abs(db_total), abs(dg_total))
+        lin_dist = math.sqrt((x_t - x_c) ** 2 + (y_t - y_c) ** 2 + (z_t - z_c) ** 2)
+
+        # Number of substeps so each axis stays within server's per-call ceiling.
+        if max_abs_angle <= 0.0:
+            n = 1
+        else:
+            n = max(1, math.ceil(max_abs_angle / self._max_delta_per_step_deg))
+
+        # Velocity guardrails: stretch total time if the requested t_sec
+        # would exceed the configured caps. This trades speed for safety.
+        t_required_ang = max_abs_angle / self._max_omega_deg_s if self._max_omega_deg_s > 0 else 0.0
+        t_required_lin = lin_dist / self._max_lin_m_s if self._max_lin_m_s > 0 else 0.0
+        t_total = max(t_sec, t_required_ang, t_required_lin)
+
+        # Per-substep time, clamped to the server's minimum.
+        t_each = max(self._min_step_time_s, t_total / n)
+
+        # Per-substep deltas.
+        da = da_total / n
+        db = db_total / n
+        dg = dg_total / n
+
+        substeps = []
+        for k in range(1, n + 1):
+            frac = k / n
+            xf = x_c + (x_t - x_c) * frac
+            yf = y_c + (y_t - y_c) * frac
+            zf = z_c + (z_t - z_c) * frac
+            substeps.append((xf, yf, zf, t_each, da, db, dg))
+        return substeps
+
+    # ----- action chunk execution -----
 
     def _move_to_q(
         self,
@@ -146,9 +239,23 @@ class FrankaRestDriver:
         t_sec: float,
         lock_down: bool,
     ) -> None:
+        import panda_py
         cur = self.get_state()
-        x, y, z, da, db, dg = self._row_to_cartesian(cur.q.astype(np.float64), q_target, lock_down)
-        self._post("moveToCartesian", [x, y, z, t_sec, da, db, dg])
+        T_cur = panda_py.fk(cur.q.astype(np.float64))
+        T_tgt = panda_py.fk(np.asarray(q_target, dtype=np.float64))
+
+        x_c, y_c, z_c = float(T_cur[0, 3]), float(T_cur[1, 3]), float(T_cur[2, 3])
+        x_t, y_t, z_t = float(T_tgt[0, 3]), float(T_tgt[1, 3]), float(T_tgt[2, 3])
+        a_c, b_c, g_c = _zyx_euler_from_R(T_cur[:3, :3])
+        a_t, b_t, g_t = _zyx_euler_from_R(T_tgt[:3, :3])
+
+        substeps = self._plan_substeps(
+            x_c, y_c, z_c, x_t, y_t, z_t,
+            a_c, b_c, g_c, a_t, b_t, g_t,
+            t_sec=t_sec, lock_down=lock_down,
+        )
+        for xf, yf, zf, tf, da, db, dg in substeps:
+            self._post("moveToCartesian", [xf, yf, zf, tf, da, db, dg])
 
     def _set_gripper(self, close: bool) -> None:
         if self._last_grip is not None and close == self._last_grip:
@@ -169,15 +276,12 @@ class FrankaRestDriver:
         substep_dt_s: float = 0.01,
         max_joint_vel_rad_s: float = 0.5,
     ) -> None:
-        """Stream a (N, 8) action chunk through moveToCartesian + openGripper/closeGripper.
+        """Stream a (N, 8) action chunk through moveToCartesian + open/closeGripper.
 
         Each row of `actions` is (q[0..6], grip). We FK each row locally to
-        produce the server's xyz + ZYX-Euler-delta-degrees input. Gripper
-        toggles are issued only when the binary state changes between rows.
-
-        `step_dt_s` is the per-row commanded motion time. PandaDriver uses
-        ~0.1 s for substep ramping; on the REST path it's the full move
-        duration, so callers should pass the step-time (e.g. 2.5 s) explicitly.
+        produce the server's xyz + ZYX-Euler-delta-degrees input, subdividing
+        any row whose orientation delta would exceed the server's ±90° per-axis
+        clip or the configured angular/linear velocity caps.
         """
         actions = np.asarray(actions, dtype=np.float64)
         if actions.ndim != 2 or actions.shape[1] != 8:
