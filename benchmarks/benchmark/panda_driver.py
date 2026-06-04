@@ -7,6 +7,15 @@ The DROID checkpoint outputs `actions[N, 8]` where:
 We bypass the C++ motion_server REST API because that endpoint only speaks
 cartesian deltas. panda_py talks to libfranka directly and is what
 franka/python/basic.py already uses on this rig.
+
+Tunable via env vars (all optional):
+    FRANKA_BENCH_FCI_CAM_DX_M   wrist-cam → TCP X offset in base frame, applied
+                                ONLY to the terminal row of each chunk. FK the
+                                row's joints → shift TCP X → IK back with the
+                                previous row as seed. Set to the camera's
+                                forward offset from the gripper (e.g. 0.08).
+                                Default 0.
+    FRANKA_BENCH_FCI_CAM_DZ_M   same idea for Z (cam above TCP). Default 0.
 """
 from __future__ import annotations
 
@@ -74,6 +83,11 @@ class PandaDriver:
             self._panda.get_robot().setCartesianImpedance([3000, 3000, 3000, 300, 300, 300])
         except Exception:
             pass
+
+        # Wrist-cam → TCP offsets in the robot base frame. Applied only to the
+        # last row of each chunk, mirroring FrankaRestDriver. See module docstring.
+        self._cam_dx_m = float(os.environ.get("FRANKA_BENCH_FCI_CAM_DX_M", "0.0"))
+        self._cam_dz_m = float(os.environ.get("FRANKA_BENCH_FCI_CAM_DZ_M", "0.0"))
 
     # ----- state -----
 
@@ -147,6 +161,47 @@ class PandaDriver:
                 pass
         return out
 
+    def _apply_cam_offset_to_terminal(
+        self,
+        actions: np.ndarray,
+        max_joint_jump_rad: float = 0.5,
+    ) -> np.ndarray:
+        """Shift only the last row's TCP X/Z by self._cam_d{x,z}_m via FK→shift→IK.
+
+        Seeded with the previous row's joints (or current state if N==1) so the
+        IK solution stays on the same branch and the substep interpolator can
+        ramp smoothly into it. Falls back to the original row if IK fails or
+        jumps more than ``max_joint_jump_rad`` per joint.
+        """
+        if self._cam_dx_m == 0.0 and self._cam_dz_m == 0.0:
+            return actions
+        try:
+            import panda_py
+        except Exception:
+            return actions
+        out = actions.copy()
+        try:
+            if len(actions) >= 2:
+                seed = np.asarray(actions[-2, :7], dtype=np.float64)
+            else:
+                seed = np.asarray(self._panda.get_state().q, dtype=np.float64)
+            q_last = np.asarray(actions[-1, :7], dtype=np.float64)
+            pose = panda_py.fk(q_last)
+            pose[0, 3] += self._cam_dx_m
+            pose[2, 3] += self._cam_dz_m
+            try:
+                q_new = panda_py.ik(pose, seed)
+            except TypeError:
+                q_new = panda_py.ik(pose)
+            if q_new is None or np.any(np.isnan(q_new)):
+                return out
+            if np.max(np.abs(q_new - seed)) > max_joint_jump_rad:
+                return out
+            out[-1, :7] = q_new
+        except Exception:
+            pass
+        return out
+
     def send_chunk(
         self,
         actions: np.ndarray,
@@ -179,6 +234,7 @@ class PandaDriver:
 
         if lock_gripper_down:
             actions = self._lock_orientation_downward(actions)
+        actions = self._apply_cam_offset_to_terminal(actions)
 
         nominal_sub = max(1, int(round(step_dt_s / max(substep_dt_s, 1e-3))))
 
