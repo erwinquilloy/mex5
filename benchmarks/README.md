@@ -113,7 +113,7 @@ export FRANKA_BENCH_EXT_INDEX=0          # /dev/video0
 #### FCI (default — direct libfranka)
 
 ```bash
-export FRANKA_HOST=192.168.1.131         # robot's FCI IP
+export FRANKA_HOST=192.168.2.100         # robot's FCI IP
 export FRANKA_USER=...
 export FRANKA_PASS=...
 
@@ -126,7 +126,7 @@ python -m benchmarks.scripts.run_droid_benchmark --tasks apple_on_plate --trials
 
 One-liner (smoke test):
 ```bash
-FRANKA_HOST=192.168.1.131 FRANKA_USER=... FRANKA_PASS=... python -m benchmarks.scripts.run_droid_benchmark --tasks apple_on_plate --trials 1
+FRANKA_HOST=192.168.2.100 FRANKA_USER=... FRANKA_PASS=... python -m benchmarks.scripts.run_droid_benchmark --tasks apple_on_plate --trials 1
 ```
 
 #### REST (motion_server)
@@ -240,7 +240,7 @@ Then pick one of the three launches.
 #### Launch (FCI)
 
 ```bash
-export FRANKA_HOST=192.168.1.131
+export FRANKA_HOST=192.168.2.100
 export FRANKA_USER=...
 export FRANKA_PASS=...
 python -m benchmarks.scripts.serve_dashboard \
@@ -249,7 +249,7 @@ python -m benchmarks.scripts.serve_dashboard \
 
 One-liner:
 ```bash
-FRANKA_BENCH_EXT_INDEX=0 FRANKA_HOST=192.168.1.131 FRANKA_USER=... FRANKA_PASS=... python -m benchmarks.scripts.serve_dashboard --port 8080 --molmoact-url http://localhost:8000
+FRANKA_BENCH_EXT_INDEX=0 FRANKA_HOST=192.168.2.100 FRANKA_USER=... FRANKA_PASS=... python -m benchmarks.scripts.serve_dashboard --port 8080 --molmoact-url http://localhost:8000
 ```
 
 #### Launch (REST)
@@ -401,7 +401,7 @@ export FRANKA_BENCH_EXT_INDEX=0
 
 ```bash
 # Ctrl-C motion_server in its terminal first
-export FRANKA_HOST=192.168.1.131            # robot FCI IP
+export FRANKA_HOST=192.168.2.100            # robot FCI IP
 export FRANKA_USER=...
 export FRANKA_PASS=...
 python -m benchmarks.scripts.run_droid_benchmark \
@@ -410,7 +410,7 @@ python -m benchmarks.scripts.run_droid_benchmark \
 
 One-liner:
 ```bash
-FRANKA_HOST=192.168.1.131 FRANKA_USER=... FRANKA_PASS=... python -m benchmarks.scripts.run_droid_benchmark --transport fci --tasks apple_on_plate --trials 1
+FRANKA_HOST=192.168.2.100 FRANKA_USER=... FRANKA_PASS=... python -m benchmarks.scripts.run_droid_benchmark --transport fci --tasks apple_on_plate --trials 1
 ```
 
 **4b. REST** — start motion_server (step 1) in another terminal first:
@@ -463,7 +463,7 @@ transport (`fci:...`, `rest:...`, `mcp:...`). Motion overhead shows up in
 
 ### Common bites
 
-- **Wrong host for REST/MCP.** `192.168.1.131` is FCI; `192.168.2.1` is what
+- **Wrong host for REST/MCP.** `192.168.2.100` is FCI; `192.168.2.1` is what
   the repo's existing clients use for motion_server. The driver no longer
   falls back from `FRANKA_HOST` — wrong env → loud error with a hint.
 - **Both endpoints up at once.** motion_server holds FCI exclusively; FCI
@@ -500,7 +500,7 @@ after a debug run.
 **FCI** (motion_server must be stopped):
 
 ```bash
-FRANKA_HOST=192.168.1.131 python -c "from benchmarks.benchmark.panda_driver import PandaDriver; PandaDriver().home()"
+FRANKA_HOST=192.168.2.100 python -c "from benchmarks.benchmark.panda_driver import PandaDriver; PandaDriver().home()"
 ```
 
 **REST** — either restart motion_server (its `initialize()` calls `goHome`,
