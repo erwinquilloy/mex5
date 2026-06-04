@@ -38,11 +38,14 @@ Tunable via env vars (all optional):
     FRANKA_BENCH_REST_MAX_LIN_M_S       EE linear speed cap, default 0.25 m/s
     FRANKA_BENCH_REST_MIN_STEP_TIME_S   minimum per-call tf, default 0.5 s
     FRANKA_BENCH_REST_CAM_DX_M          wrist-cam → TCP X offset in base frame,
-                                        added to every commanded target. Set to
-                                        the camera's forward offset from the
-                                        gripper (e.g. 0.08 if the RealSense sits
-                                        +8 cm along +x of the TCP). Default 0.
-    FRANKA_BENCH_REST_CAM_DZ_M          same idea for Z (cam above TCP). Default 0.
+                                        added ONLY to the last row of each
+                                        action chunk (the terminal pose where
+                                        alignment matters). Set to the camera's
+                                        forward offset from the gripper (e.g.
+                                        0.08 if the RealSense sits +8 cm along
+                                        +x of the TCP). Default 0.
+    FRANKA_BENCH_REST_CAM_DZ_M          same idea for Z (cam above TCP), also
+                                        terminal-only. Default 0.
 """
 from __future__ import annotations
 
@@ -251,6 +254,7 @@ class FrankaRestDriver:
         q_target: np.ndarray,
         t_sec: float,
         lock_down: bool,
+        apply_cam_offset: bool = False,
     ) -> None:
         import panda_py
         cur = self.get_state()
@@ -259,8 +263,9 @@ class FrankaRestDriver:
 
         x_c, y_c, z_c = float(T_cur[0, 3]), float(T_cur[1, 3]), float(T_cur[2, 3])
         x_t, y_t, z_t = float(T_tgt[0, 3]), float(T_tgt[1, 3]), float(T_tgt[2, 3])
-        x_t += self._cam_dx_m
-        z_t += self._cam_dz_m
+        if apply_cam_offset:
+            x_t += self._cam_dx_m
+            z_t += self._cam_dz_m
         a_c, b_c, g_c = _zyx_euler_from_R(T_cur[:3, :3])
         a_t, b_t, g_t = _zyx_euler_from_R(T_tgt[:3, :3])
 
@@ -304,11 +309,17 @@ class FrankaRestDriver:
         if len(actions) == 0:
             return
         t_sec = float(step_dt_s if step_dt_s is not None else self._step_time_s)
-        for row in actions:
+        last_idx = len(actions) - 1
+        for i, row in enumerate(actions):
             q_target = row[:7]
             close = bool(row[7] >= grip_threshold)
             self._set_gripper(close)
-            self._move_to_q(q_target, t_sec=t_sec, lock_down=lock_gripper_down)
+            self._move_to_q(
+                q_target,
+                t_sec=t_sec,
+                lock_down=lock_gripper_down,
+                apply_cam_offset=(i == last_idx),
+            )
 
     # ----- lifecycle -----
 
