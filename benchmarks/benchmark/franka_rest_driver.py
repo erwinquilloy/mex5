@@ -37,6 +37,12 @@ Tunable via env vars (all optional):
     FRANKA_BENCH_REST_MAX_OMEGA_DEG_S   per-axis max angular vel, default 45°/s
     FRANKA_BENCH_REST_MAX_LIN_M_S       EE linear speed cap, default 0.25 m/s
     FRANKA_BENCH_REST_MIN_STEP_TIME_S   minimum per-call tf, default 0.5 s
+    FRANKA_BENCH_REST_CAM_DX_M          wrist-cam → TCP X offset in base frame,
+                                        added to every commanded target. Set to
+                                        the camera's forward offset from the
+                                        gripper (e.g. 0.08 if the RealSense sits
+                                        +8 cm along +x of the TCP). Default 0.
+    FRANKA_BENCH_REST_CAM_DZ_M          same idea for Z (cam above TCP). Default 0.
 """
 from __future__ import annotations
 
@@ -126,6 +132,13 @@ class FrankaRestDriver:
             _SERVER_MIN_STEP_TIME_S,
             float(os.environ.get("FRANKA_BENCH_REST_MIN_STEP_TIME_S", str(_SERVER_MIN_STEP_TIME_S))),
         )
+
+        # Wrist-cam → TCP offsets in the robot base frame. The policy reasons
+        # about the scene through the camera, but commands the TCP; if the cam
+        # is mounted forward/above the gripper, every target needs to be shifted
+        # by the same offset so the gripper lands where the cam sees the object.
+        self._cam_dx_m = float(os.environ.get("FRANKA_BENCH_REST_CAM_DX_M", "0.0"))
+        self._cam_dz_m = float(os.environ.get("FRANKA_BENCH_REST_CAM_DZ_M", "0.0"))
 
         try:
             import panda_py  # noqa: F401
@@ -246,6 +259,8 @@ class FrankaRestDriver:
 
         x_c, y_c, z_c = float(T_cur[0, 3]), float(T_cur[1, 3]), float(T_cur[2, 3])
         x_t, y_t, z_t = float(T_tgt[0, 3]), float(T_tgt[1, 3]), float(T_tgt[2, 3])
+        x_t += self._cam_dx_m
+        z_t += self._cam_dz_m
         a_c, b_c, g_c = _zyx_euler_from_R(T_cur[:3, :3])
         a_t, b_t, g_t = _zyx_euler_from_R(T_tgt[:3, :3])
 
