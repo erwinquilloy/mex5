@@ -383,119 +383,157 @@ identical — the dashboard is just an interactive shell around them.
 Step-by-step recipe to bring everything up and run all three transports back
 to back, then compare. Use this as a checklist when you sit down at the rig.
 
-### 0. Pull latest
+Do these in order from a fresh login. Steps 0–4 are common to every
+transport; then pick **one** of 5a/5b/5c.
+
+### 0. cd into the repo and pull latest
 
 ```bash
-cd ~/mex5
-git pull --ff-only origin main      # should land at 3c6f40e or later
+cd ~/erwin/mex5                     # path may differ per box; adjust below
+git pull --ff-only origin main
 ```
 
-### 1. Rebuild motion_server (REST/MCP only — skip if FCI-only)
+### 1. Activate the venv
 
-On the host that runs motion_server (the one with libfranka). If it's a
-different box from the workstation, SSH in first.
+Workstation deps (panda-py, RealSense SDK, json-numpy) live in the project
+venv. Outside it the system Python doesn't even have `python` aliased to
+`python3`, let alone the right libraries.
 
 ```bash
-cd ~/mex5/franka/cpp
-mkdir -p build && cd build
-cmake ..
-make
-./motion_server     # binds 0.0.0.0:34568, prompts before homing
+source ~/erwin/mex5/.venv/bin/activate
+# pinocchio's .so must be on the loader path for panda-py kinematics:
+export LD_LIBRARY_PATH=/opt/openrobots/lib
 ```
 
-One-liner:
+Your prompt should now start with `(.venv)`. Quick sanity check:
 ```bash
-cd ~/mex5/franka/cpp && mkdir -p build && cd build && cmake .. && make && ./motion_server
+which python
+python -c "import panda_py, pyrealsense2; print('ok')"
 ```
 
-Note the IP this box has on the lab network — that's `FRANKA_REST_HOST` below.
-
-### 2. Install fastmcp (MCP only)
-
-On the workstation (benchmark client) **and** on the host where you'll run
-`mcp_server.py`:
-
+If `panda_py` is missing, or its `.so` links against `libfranka 0.9.x`
+(the PyPI wheel), this rig is an FR3 (server v9) and you need the source
+build against libfranka 0.15. Recipe is in your auto-memory
+(`panda_py_fr3_install.md`); short form:
 ```bash
-pip install fastmcp
+CMAKE_PREFIX_PATH=/usr/local:/opt/openrobots \
+CMAKE_ARGS='-DLIBFRANKA_VER=0x000f00 -DCMAKE_CXX_FLAGS=-I/opt/openrobots/include' \
+  pip install --no-binary :all: \
+  "git+https://github.com/JeanElsner/panda-py.git@jean/chore/update-upstream"
 ```
 
-### 3. Model server + tunnel (all transports)
+### 2. SSH tunnel to the HPC model server
+
+The benchmark client hits `http://localhost:8000/act`, which the tunnel
+forwards to `host_server_droid.py` on the HPC. `-f` lets ssh prompt for
+your password in the foreground, then forks to the background (avoids the
+`Stopped (tty input)` you get from `ssh ... &` with backgrounded auth).
 
 ```bash
-# HPC side (tmux / screen):
-cd ~/molmoact2 && uv run python examples/droid/host_server_droid.py \
-    --host 0.0.0.0 --port 8000 --dtype bfloat16
+# kill any stale tunnel from a previous session
+pkill -f "ssh -N -L 8000:localhost:8000" 2>/dev/null
 
-# workstation:
-ssh -N -L 8000:localhost:8000 erwin.quilloy@ai-n002.hpc.coe.upd.edu.ph &
-curl http://localhost:8000/act      # expect {"status": "ok", "repo_id": "...", ...}
+ssh -f -N -L 8000:localhost:8000 erwin.quilloy@ai-n002.hpc.coe.upd.edu.ph
+
+# verify the model server replies
+curl -m 3 http://localhost:8000/act
+# expect: {"status": "ok", "repo_id": "...", ...}
 ```
 
-### 4. Smoke-test each transport (one task, one trial each)
+If `curl` connection-refuses, the tunnel is up but `host_server_droid.py`
+isn't running on the HPC — SSH in and check the tmux/screen session
+(see `benchmarks/hpc/README.md`).
 
-Common env vars first:
+### 3. Robot prep (Desk)
+
+In a browser → `https://192.168.2.100/desk`:
+- Joints **unlocked** (LEDs white, not blue).
+- **FCI active** (top-of-page mode chip, not "Programming"/"Execution").
+- Clear any red reflex/error banners.
+
+The runner will auto-home at the start of each trial; you don't need to
+home manually.
+
+### 4. Camera env vars (all transports)
 
 ```bash
-cd ~/mex5
-# activate whichever conda/venv has the workstation deps installed
-export FRANKA_BENCH_EXT_INDEX=0
-# optional: export FRANKA_BENCH_WRIST_SERIAL=<D457 serial>
+export FRANKA_BENCH_EXT_INDEX=6            # USB webcam (NOT the RealSense /dev/video* node)
+export FRANKA_BENCH_CAM_W=640              # RealSense D455 has no 256x256 mode
+export FRANKA_BENCH_CAM_H=480
+# optional: FRANKA_BENCH_WRIST_SERIAL=<D457 serial> to pin the wrist cam
+# optional: FRANKA_BENCH_EXT_FLIP_H=1 if the external tripod faces the robot
 ```
 
-**4a. FCI** — motion_server must be **stopped** (it would hold FCI exclusively):
+Confirm the external index with `v4l2-ctl --list-devices` and pick the one
+**not** under "Intel RealSense".
 
+### 5. Pick a transport and run
+
+#### 5a. FCI (default — direct libfranka)
+
+Motion_server must be **stopped** (FCI is exclusive):
 ```bash
-# Ctrl-C motion_server in its terminal first
-export FRANKA_HOST=192.168.2.100            # robot FCI IP
-export FRANKA_USER=...
-export FRANKA_PASS=...
+pkill -f motion_server 2>/dev/null
+
+export FRANKA_HOST=192.168.2.100           # robot FCI IP
+export FRANKA_USER=<real desk username>
+export FRANKA_PASS=<real desk password>
+
 python -m benchmarks.scripts.run_droid_benchmark \
     --transport fci --tasks apple_on_plate --trials 1
 ```
 
-One-liner:
+> **FR3 only:** `panda_py` real-time control needs the **PREEMPT_RT
+> kernel**. Check with `uname -r` — must show `…-rt…`. Stock kernels throw
+> `RealtimeException`. If you're on a stock kernel, either reboot into the
+> RT entry or use the REST transport instead.
+
+#### 5b. REST (motion_server)
+
+In a **separate terminal** (on the motion_server host — typically the same
+box):
 ```bash
-FRANKA_HOST=192.168.2.100 FRANKA_USER=... FRANKA_PASS=... python -m benchmarks.scripts.run_droid_benchmark --transport fci --tasks apple_on_plate --trials 1
+cd ~/erwin/mex5/franka/cpp
+mkdir -p build && cd build && cmake .. && make
+./motion_server                            # binds 0.0.0.0:34568; leave running
 ```
 
-**4b. REST** — start motion_server (step 1) in another terminal first:
-
+Back in the benchmark terminal:
 ```bash
-unset FRANKA_HOST                           # avoid confusion
-export FRANKA_REST_HOST=<motion_server IP>  # repo default in clients: 192.168.2.1
+unset FRANKA_HOST                          # avoid transport confusion
+export FRANKA_REST_HOST=192.168.2.1        # motion_server box, NOT the robot
+
 python -m benchmarks.scripts.run_droid_benchmark \
     --transport rest --rest-step-time-s 2.5 \
     --tasks apple_on_plate --trials 1
 ```
 
-One-liner:
+The REST driver also imports `panda_py` (for FK only — no FCI, no RT
+kernel needed). If the FCI version-mismatch error blocked you earlier, REST
+still works once `panda_py` is installed.
+
+#### 5c. MCP (fastmcp → motion_server)
+
+Needs **both** servers running. In two extra terminals:
 ```bash
-unset FRANKA_HOST; FRANKA_REST_HOST=<motion_server IP> python -m benchmarks.scripts.run_droid_benchmark --transport rest --rest-step-time-s 2.5 --tasks apple_on_plate --trials 1
+# terminal A: motion_server (same as 5b)
+cd ~/erwin/mex5/franka/cpp/build && ./motion_server
+
+# terminal B: mcp_server
+pip install fastmcp                        # one-time, on both boxes
+cd ~/erwin/mex5/franka/python && python3 mcp_server.py
 ```
 
-**4c. MCP** — motion_server **and** mcp_server both running:
-
+Benchmark terminal:
 ```bash
-# third terminal:
-cd ~/mex5/franka/python
-python3 mcp_server.py                       # 0.0.0.0:8085/franka
-
-# back in the benchmark terminal:
 export FRANKA_MCP_URL=http://<mcp host>:8085/franka
+
 python -m benchmarks.scripts.run_droid_benchmark \
     --transport mcp --rest-step-time-s 2.5 \
     --tasks apple_on_plate --trials 1
 ```
 
-One-liners:
-```bash
-# third terminal (mcp_server):
-cd ~/mex5/franka/python && python3 mcp_server.py
-# benchmark terminal:
-FRANKA_MCP_URL=http://<mcp host>:8085/franka python -m benchmarks.scripts.run_droid_benchmark --transport mcp --rest-step-time-s 2.5 --tasks apple_on_plate --trials 1
-```
-
-### 5. Compare
+### 6. Compare
 
 ```bash
 ls -lt benchmarks/results/ | head -5
