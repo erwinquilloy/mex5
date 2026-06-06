@@ -501,7 +501,19 @@ export FRANKA_BENCH_EXT_FLIP_H=1           # mirror external view back to canoni
 #   FCI only — IK-solve each row with the TCP Z-axis pinned to vertical so
 #   the gripper can't tilt mid-trajectory. Helps top-down grasps (apple,
 #   cube, knife, objects_in_bowl). Skip for pipette_in_tray (long tool;
-#   model may genuinely want a tilted approach).
+#   model may genuinely want a tilted approach). Also skip if the table is
+#   low — vertical IK can become unreachable on the FR3 and rows get
+#   silently dropped (arm freezes hovering above the object).
+
+# optional REST/MCP two-phase approach speed — race through free space,
+# slow only inside the precision zone near the table. Both vars must be
+# set; either unset leaves single-speed behavior (--rest-step-time-s
+# applies to every row).
+# export FRANKA_BENCH_REST_FAST_STEP_TIME_S=1.0   # per-row time when above zone
+# export FRANKA_BENCH_REST_SLOW_ZONE_Z_M=0.20     # TCP Z (m) at/below which slow time applies
+#   Pick SLOW_ZONE_Z_M ≈ table_height + 0.20. On airscan4 the table is
+#   roughly at base Z = 0, so 0.20 means "slow for the last 20 cm of
+#   descent". Tune by watching where the gripper transitions.
 ```
 
 Confirm the external index with `v4l2-ctl --list-devices` and pick the one

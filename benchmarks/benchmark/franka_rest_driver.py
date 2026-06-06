@@ -46,6 +46,16 @@ Tunable via env vars (all optional):
                                         +x of the TCP). Default 0.
     FRANKA_BENCH_REST_CAM_DZ_M          same idea for Z (cam above TCP), also
                                         terminal-only. Default 0.
+    FRANKA_BENCH_REST_FAST_STEP_TIME_S  per-row motion time used when the
+                                        commanded TCP Z is at/above
+                                        FRANKA_BENCH_REST_SLOW_ZONE_Z_M. Free
+                                        space → race through; only the default
+                                        --rest-step-time-s is used near the
+                                        table. Both env vars must be set to
+                                        enable the two-phase behavior.
+    FRANKA_BENCH_REST_SLOW_ZONE_Z_M     TCP Z (m, base frame) at and below
+                                        which the slow time applies. Roughly
+                                        "table height + 20 cm".
 """
 from __future__ import annotations
 
@@ -142,6 +152,17 @@ class FrankaRestDriver:
         # by the same offset so the gripper lands where the cam sees the object.
         self._cam_dx_m = float(os.environ.get("FRANKA_BENCH_REST_CAM_DX_M", "0.0"))
         self._cam_dz_m = float(os.environ.get("FRANKA_BENCH_REST_CAM_DZ_M", "0.0"))
+
+        # Two-phase approach speed. When BOTH env vars are set, rows whose FK'd
+        # target TCP Z is at or above SLOW_ZONE_Z_M use FAST_STEP_TIME_S
+        # instead of the default step_time_s. Idea: race the gripper through
+        # free space, slow down only inside the "approach zone" near the table
+        # where precision matters. Leave either var unset to keep the original
+        # single-speed behavior.
+        _fast = os.environ.get("FRANKA_BENCH_REST_FAST_STEP_TIME_S")
+        _zone = os.environ.get("FRANKA_BENCH_REST_SLOW_ZONE_Z_M")
+        self._fast_step_time_s: Optional[float] = float(_fast) if _fast else None
+        self._slow_zone_z_m: Optional[float] = float(_zone) if _zone else None
 
         try:
             import panda_py  # noqa: F401
@@ -308,16 +329,27 @@ class FrankaRestDriver:
             raise ValueError(f"expected (N, 8), got {actions.shape}")
         if len(actions) == 0:
             return
-        t_sec = float(step_dt_s if step_dt_s is not None else self._step_time_s)
+        slow_t_sec = float(step_dt_s if step_dt_s is not None else self._step_time_s)
         last_idx = len(actions) - 1
         # Only the chunk that actually grasps gets the wrist-cam → TCP offset:
         # mid-trajectory chunks (gripper stays open) don't need alignment
         # correction and applying it there warps the approach path.
         is_grasp_chunk = bool(actions[last_idx, 7] >= grip_threshold)
+        two_phase = self._fast_step_time_s is not None and self._slow_zone_z_m is not None
+        if two_phase:
+            import panda_py
         for i, row in enumerate(actions):
             q_target = row[:7]
             close = bool(row[7] >= grip_threshold)
             self._set_gripper(close)
+            t_sec = slow_t_sec
+            if two_phase:
+                try:
+                    z_target = float(panda_py.fk(np.asarray(q_target, dtype=np.float64))[2, 3])
+                    if z_target >= self._slow_zone_z_m:  # type: ignore[operator]
+                        t_sec = self._fast_step_time_s  # type: ignore[assignment]
+                except Exception:
+                    pass
             self._move_to_q(
                 q_target,
                 t_sec=t_sec,
