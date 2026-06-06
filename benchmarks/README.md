@@ -626,10 +626,34 @@ cd ~/erwin/mex5
 unset FRANKA_HOST                          # avoid transport confusion
 export FRANKA_REST_HOST=192.168.2.1        # motion_server box, NOT the robot
 
+# Two-phase approach speed (recommended on this rig): race through free
+# space at 1.0 s/row, then drop to the slow --rest-step-time-s the moment
+# the commanded TCP Z is at or below 20 cm. Comment out either var to fall
+# back to single-speed.
+export FRANKA_BENCH_REST_FAST_STEP_TIME_S=1.0
+export FRANKA_BENCH_REST_SLOW_ZONE_Z_M=0.20
+
 python -m benchmarks.scripts.run_droid_benchmark \
     --transport rest --rest-step-time-s 2.5 \
     --tasks apple_on_plate --trials 1
 ```
+
+**Tuning the two-phase loop** (REST/MCP only):
+
+| Env var | Recommended | Effect |
+|---|---:|---|
+| `FRANKA_BENCH_REST_FAST_STEP_TIME_S` | `1.0` | Per-row motion time when target TCP Z is above the zone. Lower = faster traverse through free space. Server enforces a floor of 0.5 s. |
+| `FRANKA_BENCH_REST_SLOW_ZONE_Z_M` | `0.20` | TCP Z (m, base frame) at/below which the slow `--rest-step-time-s` kicks in. Roughly "table height + 0.20". On airscan4 the table is at base Z ≈ 0, so 0.20 ≈ "slow for the last 20 cm of descent". |
+| `--rest-step-time-s` | `2.5` | Per-row motion time inside the slow zone (and the only time used when either env var above is unset). Default 2.5 s. |
+
+If you don't know where Z = 0 lands on your rig, read the current TCP Z
+once after homing (with motion_server **stopped**, since it holds FCI):
+```bash
+python -c "import os, panda_py; print(panda_py.Panda(os.environ['FRANKA_HOST']).get_state().O_T_EE[14])"
+```
+Subtract roughly the table-top measurement from there. If the slow→fast
+transition happens too late and you feel a jolt mid-descent, raise
+`SLOW_ZONE_Z_M` to `0.25` or `0.30` to start slowing higher.
 
 The REST driver also imports `panda_py` (for FK only — no FCI, no RT
 kernel needed). If the FCI version-mismatch error blocked you earlier, REST
