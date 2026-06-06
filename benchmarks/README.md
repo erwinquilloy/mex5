@@ -483,10 +483,21 @@ Confirm the external index with `v4l2-ctl --list-devices` and pick the one
 
 #### 5a. FCI (default — direct libfranka)
 
-Motion_server must be **stopped** (FCI is exclusive):
+Cleanup ritual — FCI is single-client, so anything else holding the robot
+must die first:
 ```bash
+# motion_server holds FCI exclusively if it's up
 pkill -f motion_server 2>/dev/null
+# previous run_droid_benchmark / dashboard / panda_py session
+pkill -f run_droid_benchmark 2>/dev/null
+pkill -f serve_dashboard 2>/dev/null
+# confirm nothing's left
+pgrep -af motion_server; pgrep -af run_droid_benchmark; pgrep -af serve_dashboard
+# (each line should return empty)
+```
 
+Then run:
+```bash
 export FRANKA_HOST=192.168.2.100           # robot FCI IP
 export FRANKA_USER=<real desk username>
 export FRANKA_PASS=<real desk password>
@@ -502,13 +513,32 @@ python -m benchmarks.scripts.run_droid_benchmark \
 
 #### 5b. REST (motion_server)
 
+Cleanup ritual — motion_server's `initialize()` opens FCI itself, so any
+prior FCI client (an earlier `run_droid_benchmark --transport fci`, or
+the dashboard) must die first or `motion_server` will refuse with
+`libfranka: Connection timeout`:
+```bash
+pkill -f run_droid_benchmark 2>/dev/null
+pkill -f serve_dashboard 2>/dev/null
+# and any stale motion_server itself
+pkill -f motion_server 2>/dev/null
+# confirm
+pgrep -af motion_server; pgrep -af run_droid_benchmark; pgrep -af serve_dashboard
+```
+
 In a **separate terminal** (on the motion_server host — typically the same
-box):
+box) start motion_server:
 ```bash
 cd ~/erwin/mex5/franka/cpp
 mkdir -p build && cd build && cmake .. && make
 ./motion_server                            # binds 0.0.0.0:34568; leave running
 ```
+
+If `initialize()` fails with `cartesian_reflex` (common when the arm is in
+pack pose), get the arm out of pack first — easiest is the **Unpack**
+action in Desk; alternatively hand-guide it into a roughly extended pose
+or run `python -c "import os, panda_py; panda_py.Panda(os.environ['FRANKA_HOST']).move_to_start()"`
+in a separate (venv-activated) terminal, then re-run motion_server.
 
 Back in the benchmark terminal:
 ```bash
