@@ -480,22 +480,20 @@ export FRANKA_BENCH_EXT_INDEX=6            # USB webcam (NOT the RealSense /dev/
 export FRANKA_BENCH_CAM_W=640              # RealSense D455 has no 256x256 mode
 export FRANKA_BENCH_CAM_H=480
 
-# Required on the lab rig (airscan4): the model exhibits a global
-# perception bias (gripper consistently +6 cm forward, +8 cm too high
-# vs. apple ground truth, across multiple workspace positions) caused
-# by the non-canonical external-cam framing. The wrist-cam offsets
-# below cancel that bias in software; the proper fix is moving the
-# tripod behind+above the robot (DROID canonical). The external also
-# faces the robot, so robot +Y maps to image-left — flip to compensate.
-export FRANKA_BENCH_REST_CAM_OFFSET_MODE=always   # apply offset on every row, not just grasp terminal
-export FRANKA_BENCH_REST_CAM_DX_M=-0.06           # pull commanded TCP back 6 cm
-export FRANKA_BENCH_REST_CAM_DZ_M=-0.08           # push commanded TCP down 8 cm
-# don't set FRANKA_BENCH_REST_CAM_DY_M — the Y bias is asymmetric
-# (right side overshoots, left side is fine), so a constant DY would
-# improve right-side trials and break left-side trials. Re-tripod for Y.
-export FRANKA_BENCH_FCI_CAM_OFFSET_MODE=always    # same modes/sem as REST
-export FRANKA_BENCH_FCI_CAM_DX_M=-0.06
-export FRANKA_BENCH_FCI_CAM_DZ_M=-0.08
+# Required on the lab rig (airscan4): the wrist RealSense sits ~8 cm forward
+# of the TCP and ~5 cm above the grasp plane, and the external tripod faces
+# the robot (DROID canonical is behind+above, so robot +Y maps to image-left
+# — flip to compensate). DZ is negative because the code adds the offset to
+# the commanded terminal Z, and we need TCP to descend further to grasp.
+# These DX/DZ values fire on the grasp chunk's terminal row only (the
+# default OFFSET_MODE=grasp_terminal). The 'always' mode is documented
+# below as an opt-in for whole-trajectory perception bias; not recommended
+# on FCI (orientation drift from per-row IK branch flips) and only on REST
+# with the two-phase fast time DISABLED.
+export FRANKA_BENCH_REST_CAM_DX_M=0.08     # wrist-cam → TCP X offset (REST/MCP)
+export FRANKA_BENCH_REST_CAM_DZ_M=-0.05    # wrist-cam → TCP Z offset (REST/MCP)
+export FRANKA_BENCH_FCI_CAM_DX_M=0.08      # same for FCI (terminal-pose only)
+export FRANKA_BENCH_FCI_CAM_DZ_M=-0.05     # same for FCI
 export FRANKA_BENCH_EXT_FLIP_H=1           # mirror external view back to canonical
 
 # optional: FRANKA_BENCH_WRIST_SERIAL=<D457 serial> to pin the wrist cam
