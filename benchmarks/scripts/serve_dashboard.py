@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import threading
 import time
 from typing import Optional
@@ -83,6 +84,7 @@ class DashboardState:
         exec_rows: int,
         grasp_commit_grip_frac: float,
         fine_refinement_travel_rad: float,
+        max_chunks: int = 30,
     ):
         self.molmoact_url = molmoact_url
         self.client = DroidClient(molmoact_url)
@@ -92,9 +94,30 @@ class DashboardState:
         self.exec_rows = int(exec_rows)
         self.grasp_commit_grip_frac = float(grasp_commit_grip_frac)
         self.fine_refinement_travel_rad = float(fine_refinement_travel_rad)
+        self.max_chunks = int(max_chunks)
+        # Mirrors the CLI runner's read of the same env var so the dashboard
+        # behaves the same way for top-down grasp tasks.
+        self.lock_gripper_down = (
+            os.environ.get("FRANKA_BENCH_LOCK_GRIPPER_DOWN", "0")
+            not in ("0", "", "false", "False")
+        )
         self.driver = make_driver(transport, step_time_s=self.rest_step_time_s)
         self.action_lock = _ActionLock()
         self._driver_lock = threading.Lock()
+        self._stop_event = threading.Event()
+        self._progress_lock = threading.Lock()
+        self._progress = {"chunk": 0, "max": 0}
+
+    def request_stop(self) -> None:
+        self._stop_event.set()
+
+    def _set_progress(self, chunk: int, max_chunks: int) -> None:
+        with self._progress_lock:
+            self._progress = {"chunk": chunk, "max": max_chunks}
+
+    def progress(self) -> dict:
+        with self._progress_lock:
+            return dict(self._progress)
 
     def switch_transport(self, new_transport: str) -> dict:
         with self._driver_lock:
@@ -120,31 +143,60 @@ class DashboardState:
         return {"ok": True, "info": f"homed via {self.transport}"}
 
     def do_task(self, instruction: str) -> dict:
-        ext_rgb, wrist_rgb, t_grab_ms = self.camera.latest_rgb_pair()
-        if ext_rgb is None or wrist_rgb is None:
-            return {"ok": False, "error": "cameras not ready yet"}
-        with self._driver_lock:
-            state8 = self.driver.state_vec8()
+        """Run a full trial loop: capture → infer → exec, repeated up to
+        self.max_chunks times or until a /api/stop is received. Mirrors
+        droid_runner.run_trial's per-chunk loop, minus the success prompt."""
+        self._stop_event.clear()
         t0 = time.perf_counter()
-        pred = self.client.act(
-            external_cam=ext_rgb,
-            wrist_cam=wrist_rgb,
-            instruction=instruction,
-            state=state8,
-            num_steps=10,
-        )
-        rows = self._select_rows(pred.actions)
-        with self._driver_lock:
-            self.driver.send_chunk(rows, step_dt_s=self.step_dt_for_send_chunk())
+        chunks_done = 0
+        last_pred_rows = 0
+        last_exec_rows = 0
+        total_server_ms = 0.0
+        total_rtt_ms = 0.0
+        stopped_by = "max_chunks"
+        for chunk_i in range(self.max_chunks):
+            if self._stop_event.is_set():
+                stopped_by = "stop_requested"
+                break
+            self._set_progress(chunk_i + 1, self.max_chunks)
+            ext_rgb, wrist_rgb, _ = self.camera.latest_rgb_pair()
+            if ext_rgb is None or wrist_rgb is None:
+                self._set_progress(0, 0)
+                return {"ok": False, "error": "cameras not ready yet",
+                        "chunks_done": chunks_done}
+            with self._driver_lock:
+                state8 = self.driver.state_vec8()
+            pred = self.client.act(
+                external_cam=ext_rgb,
+                wrist_cam=wrist_rgb,
+                instruction=instruction,
+                state=state8,
+                num_steps=10,
+            )
+            rows = self._select_rows(pred.actions)
+            with self._driver_lock:
+                self.driver.send_chunk(
+                    rows,
+                    step_dt_s=self.step_dt_for_send_chunk(),
+                    lock_gripper_down=self.lock_gripper_down,
+                )
+            chunks_done += 1
+            last_pred_rows = int(len(pred.actions))
+            last_exec_rows = int(len(rows))
+            total_server_ms += float(pred.server_dt_ms)
+            total_rtt_ms += float(pred.rtt_ms)
+        self._set_progress(0, 0)
         return {
             "ok": True,
-            "info": f"executed {len(rows)} rows via {self.transport}",
-            "camera_ms": round(t_grab_ms, 1),
-            "infer_server_ms": round(pred.server_dt_ms, 1),
-            "infer_rtt_ms": round(pred.rtt_ms, 1),
+            "info": f"trial done via {self.transport} ({stopped_by})",
+            "stopped_by": stopped_by,
+            "chunks_done": chunks_done,
+            "chunks_budget": self.max_chunks,
             "wallclock_ms": round((time.perf_counter() - t0) * 1000.0, 1),
-            "rows_received": int(len(pred.actions)),
-            "rows_executed": int(len(rows)),
+            "infer_server_ms_total": round(total_server_ms, 1),
+            "infer_rtt_ms_total": round(total_rtt_ms, 1),
+            "last_rows_received": last_pred_rows,
+            "last_rows_executed": last_exec_rows,
         }
 
     def _select_rows(self, actions: np.ndarray) -> np.ndarray:
@@ -232,8 +284,9 @@ _INDEX_HTML = """<!doctype html>
   </div>
   <div class="row">
     <label for="task">instruction:</label>
-    <input id="task" type="text" placeholder='e.g. "pick up the apple and put it on the plate"' />
-    <button id="btn-run">run one chunk</button>
+    <input id="task" type="text" placeholder='e.g. "Put the apple on the plate."' />
+    <button id="btn-run">run trial</button>
+    <button id="btn-stop" disabled>stop</button>
   </div>
 </div>
 
@@ -297,12 +350,16 @@ async function refreshStatus() {
     const j = await r.json();
     $("#transport").value = j.transport;
     const cls = j.busy ? "busy" : (j.last && j.last.ok === false ? "err" : "ok");
-    const what = j.busy ? `[busy: ${j.what}]` : "idle";
+    const prog = j.progress || {chunk: 0, max: 0};
+    const progStr = prog.max > 0 ? ` (chunk ${prog.chunk}/${prog.max})` : "";
+    const what = j.busy ? `[busy: ${j.what}${progStr}]` : "idle";
     const last = j.last ? JSON.stringify(j.last) : "";
     status.className = cls;
     status.textContent = `${what}\\nlast: ${last}`;
     $("#btn-home").disabled = j.busy;
     $("#btn-run").disabled = j.busy;
+    // Stop is only meaningful while a trial is running.
+    $("#btn-stop").disabled = !j.busy;
   } catch (e) {
     status.className = "err";
     status.textContent = "status error: " + e;
@@ -328,6 +385,14 @@ $("#btn-run").addEventListener("click", async () => {
   });
   const j = await r.json();
   status.textContent = JSON.stringify(j);
+  await refreshStatus();
+});
+
+$("#btn-stop").addEventListener("click", async () => {
+  $("#btn-stop").disabled = true;
+  await fetch("/api/stop", { method: "POST" });
+  // The trial loop checks the flag between chunks, so the next chunk
+  // boundary will exit. Status refresh re-enables the button if needed.
   await refreshStatus();
 });
 
@@ -404,7 +469,16 @@ def make_app(state: DashboardState, fps: float = 10.0,
         snap = state.action_lock.snapshot()
         snap["transport"] = state.transport
         snap["molmoact_url"] = state.molmoact_url
+        snap["progress"] = state.progress()
         return jsonify(snap)
+
+    @app.route("/api/stop", methods=["POST"])
+    def api_stop():
+        # No action_lock: the running trial is what holds the lock; this
+        # endpoint must remain callable while the loop is mid-flight so it
+        # can signal an early exit on the next iteration boundary.
+        state.request_stop()
+        return jsonify({"ok": True, "info": "stop requested"})
 
     @app.route("/api/home", methods=["POST"])
     def api_home():
@@ -465,6 +539,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--exec-rows", type=int, default=3)
     ap.add_argument("--grasp-commit-grip-frac", type=float, default=0.5)
     ap.add_argument("--fine-refinement-travel-rad", type=float, default=0.2)
+    ap.add_argument("--max-chunks", type=int, default=30,
+                    help="safety cap on action chunks per dashboard trial. "
+                         "Matches the CLI runner's --max-chunks default (also "
+                         "the per-task max_chunks in droid_tasks.py).")
     ap.add_argument("--mjpeg-fps", type=float, default=10.0)
     ap.add_argument("--no-webrtc", action="store_true",
                     help="disable WebRTC streaming and force MJPEG even if "
@@ -484,6 +562,7 @@ def main(argv: list[str] | None = None) -> int:
         exec_rows=args.exec_rows,
         grasp_commit_grip_frac=args.grasp_commit_grip_frac,
         fine_refinement_travel_rad=args.fine_refinement_travel_rad,
+        max_chunks=args.max_chunks,
     )
 
     webrtc = None if args.no_webrtc else _build_webrtc_broadcaster()
