@@ -159,8 +159,6 @@ If you forget and both clients try FCI, you'll see
 
 ```bash
 export FRANKA_HOST=192.168.2.100         # robot's FCI IP
-export FRANKA_USER=...
-export FRANKA_PASS=...
 
 # full Table 6 (5 tasks x 15 trials, ~hours)
 python -m benchmarks.scripts.run_droid_benchmark
@@ -171,7 +169,7 @@ python -m benchmarks.scripts.run_droid_benchmark --tasks apple_on_plate --trials
 
 One-liner (smoke test):
 ```bash
-FRANKA_HOST=192.168.2.100 FRANKA_USER=... FRANKA_PASS=... python -m benchmarks.scripts.run_droid_benchmark --tasks apple_on_plate --trials 1
+FRANKA_HOST=192.168.2.100 python -m benchmarks.scripts.run_droid_benchmark --tasks apple_on_plate --trials 1
 ```
 
 #### REST (motion_server)
@@ -309,15 +307,13 @@ Then pick one of the three launches.
 
 ```bash
 export FRANKA_HOST=192.168.2.100
-export FRANKA_USER=...
-export FRANKA_PASS=...
 python -m benchmarks.scripts.serve_dashboard \
     --port 8080 --molmoact-url http://localhost:8000
 ```
 
 One-liner:
 ```bash
-FRANKA_BENCH_EXT_INDEX=0 FRANKA_HOST=192.168.2.100 FRANKA_USER=... FRANKA_PASS=... python -m benchmarks.scripts.serve_dashboard --port 8080 --molmoact-url http://localhost:8000
+FRANKA_BENCH_EXT_INDEX=0 FRANKA_HOST=192.168.2.100 python -m benchmarks.scripts.serve_dashboard --port 8080 --molmoact-url http://localhost:8000
 ```
 
 #### Launch (REST)
@@ -555,8 +551,8 @@ Then run (from the repo root):
 ```bash
 cd ~/erwin/mex5
 export FRANKA_HOST=192.168.2.100           # robot FCI IP
-export FRANKA_USER=<real desk username>
-export FRANKA_PASS=<real desk password>
+# (FCI activation is done in Desk per step 3, not via env vars — the
+# runner never reads FRANKA_USER/FRANKA_PASS.)
 
 python -m benchmarks.scripts.run_droid_benchmark \
     --transport fci --tasks apple_on_plate --trials 1
