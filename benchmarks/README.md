@@ -480,21 +480,32 @@ export FRANKA_BENCH_EXT_INDEX=6            # USB webcam (NOT the RealSense /dev/
 export FRANKA_BENCH_CAM_W=640              # RealSense D455 has no 256x256 mode
 export FRANKA_BENCH_CAM_H=480
 
-# Required on the lab rig (airscan4): the wrist RealSense sits ~8 cm forward
-# of the TCP and ~5 cm above the grasp plane, and the external tripod faces
-# the robot (DROID canonical is behind+above, so robot +Y maps to image-left
-# — flip to compensate). DZ is negative because the code adds the offset to
-# the commanded terminal Z, and we need TCP to descend further to grasp.
+# Required on the lab rig (airscan4): the wrist RealSense is currently mounted
+# UNDER the gripper (closer to the robot base than the original on-top mount),
+# so the cam → TCP forward offset is very small (DX ≈ +0.005 m, not the old
+# 0.08). DZ has not been remeasured for this mount yet — leave it commented
+# out until you've calibrated it (a single apple_on_plate trial with DZ unset
+# tells you whether the model is stopping above the object or colliding into
+# it). External tripod faces the robot, so flip the H axis back to canonical.
 # These DX/DZ values fire on the grasp chunk's terminal row only (the
 # default OFFSET_MODE=grasp_terminal). The 'always' mode is documented
 # below as an opt-in for whole-trajectory perception bias; not recommended
 # on FCI (orientation drift from per-row IK branch flips) and only on REST
 # with the two-phase fast time DISABLED.
-export FRANKA_BENCH_REST_CAM_DX_M=0.08     # wrist-cam → TCP X offset (REST/MCP)
-export FRANKA_BENCH_REST_CAM_DZ_M=-0.05    # wrist-cam → TCP Z offset (REST/MCP)
-export FRANKA_BENCH_FCI_CAM_DX_M=0.08      # same for FCI (terminal-pose only)
-export FRANKA_BENCH_FCI_CAM_DZ_M=-0.05     # same for FCI
+export FRANKA_BENCH_REST_CAM_DX_M=0.005    # wrist-cam → TCP X offset (REST/MCP)
+# export FRANKA_BENCH_REST_CAM_DZ_M=...    # unset until remeasured for new mount
+export FRANKA_BENCH_FCI_CAM_DX_M=0.005     # same for FCI (terminal-pose only)
+# export FRANKA_BENCH_FCI_CAM_DZ_M=...     # unset until remeasured for new mount
 export FRANKA_BENCH_EXT_FLIP_H=1           # mirror external view back to canonical
+
+# Wrist-cam reorientation (added after the under-gripper relocation, since the
+# camera body sits in a different orientation than the DROID-canonical mount).
+# Find values by launching the dashboard, grasping something, and walking 0 →
+# 90 → 180 → 270 until the gripper jaws sit at the bottom of the wrist preview
+# and world-down = image-down. Then mirror that into the runner via these:
+# export FRANKA_BENCH_WRIST_ROT_DEG=0          # 0 / 90 / 180 / 270
+# export FRANKA_BENCH_WRIST_FLIP_H=0           # set to 1 if cam was mounted mirrored
+# export FRANKA_BENCH_WRIST_FLIP_V=0
 
 # optional: FRANKA_BENCH_WRIST_SERIAL=<D457 serial> to pin the wrist cam
 # optional: FRANKA_BENCH_EXT_FLIP_V=1 / FRANKA_BENCH_EXT_ROT_DEG ∈ {0,90,180,270}
@@ -541,6 +552,73 @@ export FRANKA_BENCH_REST_CAM_DX_M=-0.06           # whole-trajectory shift value
 export FRANKA_BENCH_REST_CAM_DZ_M=-0.08
 ```
 Mirror with `FRANKA_BENCH_FCI_CAM_OFFSET_MODE` for FCI runs.
+
+#### Workspace XY safety clip (always on)
+
+Both drivers hard-clamp every commanded TCP target X/Y into the airscan4
+safe box before sending. This catches bad cam offsets, out-of-distribution
+policy actions, or an accidental `OFFSET_MODE=always` from pushing the
+gripper past the rig's reach. Z is intentionally not clipped — the
+slow-zone logic and table contact handle Z.
+
+| Axis | Range (base-frame metres) |
+|---|---|
+| X | `[0.0, 0.57]` |
+| Y | `[-0.4, +0.4]` |
+
+If a row gets clamped, the driver prints one line per row, e.g.:
+
+```
+[FrankaRestDriver] clamped TCP target XY (+0.612, -0.020) -> (+0.570, -0.020) m to lab box X[0.00,0.57] Y[-0.40,+0.40]
+```
+
+Values are hardcoded in `franka_rest_driver.py` and `panda_driver.py`
+(`_LAB_X_MIN/MAX`, `_LAB_Y_MIN/MAX`). If you're running on a different
+rig, edit them there — there's intentionally no env var so it can't be
+disabled by accident.
+
+#### `--hold-until-target` (debug override)
+
+Opt-in safety net for premature gripper release during a task. When
+enabled, the runner inspects every predicted action chunk: if the
+Franka gripper width is in `(0.005, 0.075)` m (i.e. the jaws stopped on
+an object) **and** a row would command gripper-open with a target XY
+*outside* the task's `target_zone_xy` box, that row's gripper bit is
+forced to "close". Other rows pass through untouched.
+
+> **This biases the benchmark.** Zero-shot Table 6 numbers must be
+> generated *without* this flag. Use it for debugging, demos, or
+> sanity-checking the rest of the loop — not paper-replication runs.
+
+To use:
+
+1. Define the target box in `benchmarks/benchmark/droid_tasks.py` per
+   task you want to guard:
+   ```python
+   DroidTask(
+       task_id="apple_on_plate",
+       ...
+       target_zone_xy=(0.40, 0.50, -0.10, 0.10),  # (xmin, xmax, ymin, ymax) m
+   ),
+   ```
+   Without `target_zone_xy` set, passing `--hold-until-target` for that
+   task errors at trial start rather than guessing.
+
+2. Pass the flag:
+   ```bash
+   python -m benchmarks.scripts.run_droid_benchmark \
+       --transport rest --rest-step-time-s 2.5 \
+       --tasks apple_on_plate --trials 1 \
+       --hold-until-target
+   ```
+
+Each chunk that hits the guard logs a one-liner:
+```
+WARNING bench.droid hold-until-target: kept gripper closed on 3/8 row(s) (apple_on_plate/#0) — policy tried to release outside target zone
+```
+
+Use that log to judge how often the policy *would* have released
+prematurely — it's the honest read on whether the loop is working.
 
 ### 5. Pick a transport and run
 
