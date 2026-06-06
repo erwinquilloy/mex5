@@ -268,11 +268,14 @@ streams — there's a Flask dashboard that replaces the CLI prompts:
   (capture → MolmoAct2 → execute the returned chunk). Click again to keep
   going. No success grading, no result-file writes — use the CLI runner for
   that.
-- Transport **dropdown**: auto-detected at startup from env vars (precedence
-  `FRANKA_MCP_URL > FRANKA_REST_HOST > FRANKA_HOST`); the dropdown lets you
+- Transport **dropdown**: FCI or REST only (MCP is dashboard-disabled;
+  use the CLI runner for MCP). Auto-detected at startup from env vars
+  (precedence `FRANKA_REST_HOST > FRANKA_HOST`); the dropdown lets you
   switch without restarting (the underlying constraints still apply —
   motion_server must be stopped to switch to FCI, running to switch to
-  REST/MCP).
+  REST). If `FRANKA_MCP_URL` is the only thing set, the dashboard
+  errors at startup with a clear message; unset it or set
+  `FRANKA_REST_HOST` instead.
 
 ### Launching the dashboard
 
@@ -343,26 +346,9 @@ One-liner:
 FRANKA_BENCH_EXT_INDEX=0 FRANKA_REST_HOST=192.168.2.1 python -m benchmarks.scripts.serve_dashboard --port 8080 --molmoact-url http://localhost:8000 --rest-step-time-s 2.5
 ```
 
-#### Launch (MCP)
-
-```bash
-# terminal A (motion_server host):
-cd ~/mex5/franka/cpp/build && ./motion_server
-
-# terminal B (mcp_server host):
-cd ~/mex5/franka/python && python3 mcp_server.py
-
-# terminal C (dashboard):
-export FRANKA_MCP_URL=http://<mcp host>:8085/franka
-python -m benchmarks.scripts.serve_dashboard \
-    --port 8080 --molmoact-url http://localhost:8000 \
-    --rest-step-time-s 2.5
-```
-
-One-liner:
-```bash
-FRANKA_BENCH_EXT_INDEX=0 FRANKA_MCP_URL=http://<mcp host>:8085/franka python -m benchmarks.scripts.serve_dashboard --port 8080 --molmoact-url http://localhost:8000 --rest-step-time-s 2.5
-```
+> **Note:** MCP is no longer supported on the dashboard. Use FCI or
+> REST. The CLI runner (`run_droid_benchmark.py`) still supports MCP,
+> so if you need to drive MCP, use the CLI.
 
 #### Using the dashboard
 

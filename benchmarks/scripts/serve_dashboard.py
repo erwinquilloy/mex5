@@ -2,8 +2,9 @@
 
 Shows live external webcam + wrist RealSense RGB streams, a "Home" button,
 and a task-instruction input that runs one inference->exec cycle per click.
-Auto-detects the robot transport (fci / rest / mcp) from env vars; a UI
-dropdown lets you switch without restarting.
+Auto-detects the robot transport (fci / rest) from env vars; a UI dropdown
+lets you switch without restarting. MCP is no longer supported on the
+dashboard -- use the CLI runner if you need MCP.
 
 Run on the workstation that has the cameras:
     pip install flask aiortc av    # aiortc/av only needed for WebRTC streaming
@@ -299,7 +300,6 @@ _INDEX_HTML = """<!doctype html>
     <select id="transport">
       <option value="fci">fci (panda_py)</option>
       <option value="rest">rest (motion_server)</option>
-      <option value="mcp">mcp (fastmcp)</option>
     </select>
     <button id="btn-home">home</button>
     <span id="status">loading...</span>
@@ -537,8 +537,9 @@ def make_app(state: DashboardState, fps: float = 10.0,
     def api_transport():
         body = request.get_json(silent=True) or {}
         new = (body.get("transport") or "").strip()
-        if new not in ("fci", "rest", "mcp"):
-            return jsonify({"ok": False, "error": "transport must be fci/rest/mcp"}), 400
+        if new not in ("fci", "rest"):
+            return jsonify({"ok": False, "error": "transport must be fci/rest "
+                                                 "(mcp is no longer dashboard-supported)"}), 400
         if not state.action_lock.acquire(f"switch->{new}"):
             return jsonify({"ok": False, "error": "another action is in progress"}), 409
         try:
@@ -555,8 +556,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--port", type=int, default=8080)
     ap.add_argument("--host", default="0.0.0.0")
     ap.add_argument("--molmoact-url", default="http://localhost:8000")
-    ap.add_argument("--transport", choices=["fci", "rest", "mcp"], default=None,
-                    help="override env-var autodetect")
+    ap.add_argument("--transport", choices=["fci", "rest"], default=None,
+                    help="override env-var autodetect. mcp is no longer "
+                         "supported on the dashboard; use rest instead.")
     ap.add_argument("--rest-step-time-s", type=float, default=2.5)
     ap.add_argument("--exec-rows", type=int, default=3)
     ap.add_argument("--grasp-commit-grip-frac", type=float, default=0.5)
@@ -575,6 +577,14 @@ def main(argv: list[str] | None = None) -> int:
                         format="%(asctime)s %(levelname)s %(name)s %(message)s")
 
     transport = args.transport or autodetect_transport()
+    if transport == "mcp":
+        # autodetect picked mcp from FRANKA_MCP_URL in the env, but the
+        # dashboard no longer supports the MCP transport. Surface a clear
+        # error rather than letting it fail later in the dropdown / driver.
+        log.error("MCP transport is no longer supported on the dashboard. "
+                  "Either unset FRANKA_MCP_URL or pass --transport rest/fci. "
+                  "(The CLI runner still supports mcp.)")
+        return 2
     log.info("transport: %s", transport)
 
     state = DashboardState(
