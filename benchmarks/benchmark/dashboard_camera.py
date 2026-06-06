@@ -148,10 +148,18 @@ class DashboardCamera:
                 ext_rgb = _rotate(ext_rgb, self._ext_rot)
             if self._ext_flip_h or self._ext_flip_v:
                 ext_rgb = _apply_flips(ext_rgb, self._ext_flip_h, self._ext_flip_v)
-            if self._wrist_rot:
-                wrist_rgb = _rotate(wrist_rgb, self._wrist_rot)
-            if self._wrist_flip_h or self._wrist_flip_v:
-                wrist_rgb = _apply_flips(wrist_rgb, self._wrist_flip_h, self._wrist_flip_v)
+            # NOTE: wrist rotation/flip intentionally disabled on the
+            # dashboard for now (env vars FRANKA_BENCH_WRIST_ROT_DEG /
+            # _FLIP_H / _FLIP_V are still read into self._wrist_rot /
+            # _flip_*, but not applied here). Empirically the rotation
+            # appears to make the under-gripper view harder for the
+            # MolmoAct2-DROID policy to grasp from -- re-enable once
+            # we know what orientation the policy actually wants.
+            # The CLI runner (dual_camera.py) still applies them.
+            # if self._wrist_rot:
+            #     wrist_rgb = _rotate(wrist_rgb, self._wrist_rot)
+            # if self._wrist_flip_h or self._wrist_flip_v:
+            #     wrist_rgb = _apply_flips(wrist_rgb, self._wrist_flip_h, self._wrist_flip_v)
 
             ext_jpg = _encode_jpeg(ext_rgb)
             wrist_jpg = _encode_jpeg(wrist_rgb)

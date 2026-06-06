@@ -213,13 +213,29 @@ class FrankaRestDriver:
         )
         if not r.ok:
             text = r.text[:500]
-            # motion_server returns 400 with a "collision_recovery:" prefix when
-            # libfranka's reflex aborted the move (contact or motion-generator
-            # discontinuity). Surface that as a typed exception so trial loops
-            # can react (abort + home) instead of crashing.
-            if r.status_code == 400 and "collision_recovery" in text.lower():
+            # Treat anything that means "robot can't / refuses to execute this
+            # commanded pose" as an abort: trial-loop consumers (dashboard,
+            # eventually CLI runner) should home and surface a clean status
+            # instead of crashing mid-trial.
+            #
+            # Two families fall under this:
+            #   * libfranka reflex aborts -- motion_server prefixes "collision_recovery:"
+            #     (contact, velocity/accel discontinuity)
+            #   * motion_server pre-flight safety rejections -- e.g.
+            #     "The desired position is too close to the table." Same
+            #     status code 400; different text. Add new motion_server
+            #     safety strings to _ABORT_HINTS as they appear.
+            _ABORT_HINTS = (
+                "collision_recovery",
+                "too close to the table",
+                "outside workspace",
+                "joint limit",
+                "self-collision",
+            )
+            text_lc = text.lower()
+            if r.status_code == 400 and any(h in text_lc for h in _ABORT_HINTS):
                 raise CollisionAborted(
-                    f"motion_server reflex on {command}({params_f}): {text}"
+                    f"motion_server safety abort on {command}({params_f}): {text}"
                 )
             raise RuntimeError(
                 f"motion_server {r.status_code} on {command}({params_f}): {text}"
