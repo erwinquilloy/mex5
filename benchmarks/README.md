@@ -510,7 +510,7 @@ export FRANKA_BENCH_EXT_FLIP_H=1           # mirror external view back to canoni
 # slow only inside the precision zone near the table. Both vars must be
 # set; either unset leaves single-speed behavior (--rest-step-time-s
 # applies to every row).
-# export FRANKA_BENCH_REST_FAST_STEP_TIME_S=1.0   # per-row time when above zone
+# export FRANKA_BENCH_REST_FAST_STEP_TIME_S=2.0   # per-row time when above zone
 # export FRANKA_BENCH_REST_SLOW_ZONE_Z_M=0.20     # TCP Z (m) at/below which slow time applies
 #   Pick SLOW_ZONE_Z_M ≈ table_height + 0.20. On airscan4 the table is
 #   roughly at base Z = 0, so 0.20 means "slow for the last 20 cm of
@@ -532,7 +532,7 @@ isn't matching what you observe.**
 |---|---|---|---|
 | `grasp_terminal` *(default)* | Last row of chunks whose terminal action commands gripper-close. | The model commits to a grasp on its own, you just need to fine-tune the close-pose alignment (small geometric wrist-cam→TCP offset). | If the model never produces a grasp chunk (it hovers/aborts), the offset never fires. Symptom: shift values change behavior at all only when the gripper closes. |
 | `every_terminal` | Last row of every chunk. | The model behaves like above but you want each chunk-boundary pose corrected too (e.g. when stretching small offsets across long approach trajectories). | Slightly warps the approach path; the policy "thinks" it ended row N at A but the robot ended at A + offset, so subsequent inference is on slightly different state. |
-| `always` | Every row of every chunk — a constant translation in the base frame applied to all commanded TCP poses. | Whole-trajectory perception bias correction (model's spatial estimate is consistently off by a few cm in X/Y/Z across the entire trial). Use when the model never even reaches grasp on its own and bias is roughly constant across workspace positions. | **FCI:** per-row FK→shift→IK can pick a different IK branch, causing gripper orientation to drift across the trajectory. Verify orientation on the wrist cam stream. **REST:** safe, but don't combine with `FAST_STEP_TIME_S=1.0` — first-chunk-from-home with 1.0 s tf + always shift trips `cartesian_motion_generator_joint_acceleration_discontinuity`. Either disable two-phase or raise `FAST_STEP_TIME_S` to ≥ 1.5. |
+| `always` | Every row of every chunk — a constant translation in the base frame applied to all commanded TCP poses. | Whole-trajectory perception bias correction (model's spatial estimate is consistently off by a few cm in X/Y/Z across the entire trial). Use when the model never even reaches grasp on its own and bias is roughly constant across workspace positions. | **FCI:** per-row FK→shift→IK can pick a different IK branch, causing gripper orientation to drift across the trajectory. Verify orientation on the wrist cam stream. **REST:** safe, but don't combine with very short `FAST_STEP_TIME_S` (≤ 1.0 s) — first-chunk-from-home with 1.0 s tf + always shift trips `cartesian_motion_generator_joint_acceleration_discontinuity`. The README's recommended `FAST_STEP_TIME_S=2.0` is the safe floor; if you need faster, either disable two-phase entirely or test small. |
 
 To opt into one of the non-default modes (REST/MCP example):
 ```bash
@@ -650,10 +650,10 @@ unset FRANKA_HOST                          # avoid transport confusion
 export FRANKA_REST_HOST=192.168.2.1        # motion_server box, NOT the robot
 
 # Two-phase approach speed (recommended on this rig): race through free
-# space at 1.0 s/row, then drop to the slow --rest-step-time-s the moment
+# space at 2.0 s/row, then drop to the slow --rest-step-time-s the moment
 # the commanded TCP Z is at or below 20 cm. Comment out either var to fall
 # back to single-speed.
-export FRANKA_BENCH_REST_FAST_STEP_TIME_S=1.0
+export FRANKA_BENCH_REST_FAST_STEP_TIME_S=2.0
 export FRANKA_BENCH_REST_SLOW_ZONE_Z_M=0.20
 
 python -m benchmarks.scripts.run_droid_benchmark \
@@ -665,7 +665,7 @@ python -m benchmarks.scripts.run_droid_benchmark \
 
 | Env var | Recommended | Effect |
 |---|---:|---|
-| `FRANKA_BENCH_REST_FAST_STEP_TIME_S` | `1.0` | Per-row motion time when target TCP Z is above the zone. Lower = faster traverse through free space. Server enforces a floor of 0.5 s. |
+| `FRANKA_BENCH_REST_FAST_STEP_TIME_S` | `2.0` | Per-row motion time when target TCP Z is above the zone. Lower = faster traverse through free space, but very short values (≤ 1.0 s) on first-chunk-from-home moves trip `cartesian_motion_generator_joint_acceleration_discontinuity`. Server enforces a floor of 0.5 s. |
 | `FRANKA_BENCH_REST_SLOW_ZONE_Z_M` | `0.20` | TCP Z (m, base frame) at/below which the slow `--rest-step-time-s` kicks in. Roughly "table height + 0.20". On airscan4 the table is at base Z ≈ 0, so 0.20 ≈ "slow for the last 20 cm of descent". |
 | `--rest-step-time-s` | `2.5` | Per-row motion time inside the slow zone (and the only time used when either env var above is unset). Default 2.5 s. |
 
