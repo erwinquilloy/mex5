@@ -497,6 +497,11 @@ export FRANKA_BENCH_EXT_FLIP_H=1           # mirror external view back to canoni
 
 # optional: FRANKA_BENCH_WRIST_SERIAL=<D457 serial> to pin the wrist cam
 # optional: FRANKA_BENCH_EXT_FLIP_V=1 / FRANKA_BENCH_EXT_ROT_DEG ∈ {0,90,180,270}
+# optional: FRANKA_BENCH_LOCK_GRIPPER_DOWN=1
+#   FCI only — IK-solve each row with the TCP Z-axis pinned to vertical so
+#   the gripper can't tilt mid-trajectory. Helps top-down grasps (apple,
+#   cube, knife, objects_in_bowl). Skip for pipette_in_tray (long tool;
+#   model may genuinely want a tilted approach).
 ```
 
 Confirm the external index with `v4l2-ctl --list-devices` and pick the one
