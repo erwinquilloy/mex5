@@ -68,8 +68,9 @@ class DashboardCamera:
         self,
         wrist_serial: Optional[str] = None,
         external_webcam_index: Optional[int] = None,
-        width: int = 256,
-        height: int = 256,
+        # D45x has no 256x256 color mode; default to a supported tuple.
+        width: int = 640,
+        height: int = 480,
         fps: int = 30,
         external_rotation_deg: int = 0,
         external_flip_h: bool = False,
@@ -197,8 +198,9 @@ def from_env() -> DashboardCamera:
             int(os.environ["FRANKA_BENCH_EXT_INDEX"])
             if "FRANKA_BENCH_EXT_INDEX" in os.environ else None
         ),
-        width=int(os.environ.get("FRANKA_BENCH_CAM_W", "256")),
-        height=int(os.environ.get("FRANKA_BENCH_CAM_H", "256")),
+        # D457/D455 have no 256x256 mode — see dual_camera.from_env note.
+        width=int(os.environ.get("FRANKA_BENCH_CAM_W", "640")),
+        height=int(os.environ.get("FRANKA_BENCH_CAM_H", "480")),
         fps=int(os.environ.get("FRANKA_BENCH_CAM_FPS", "30")),
         external_rotation_deg=int(os.environ.get("FRANKA_BENCH_EXT_ROT_DEG", "0")),
         external_flip_h=os.environ.get("FRANKA_BENCH_EXT_FLIP_H", "0") not in ("0", "", "false", "False"),
