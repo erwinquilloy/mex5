@@ -290,6 +290,10 @@ upstream pieces as the CLI runner (model server + tunnel, plus motion_server
 - [ ] **FCI only:** robot in white/unlocked state, FCI activated, motion_server **stopped**
 - [ ] **REST only:** motion_server running (see the rebuild + launch steps below)
 - [ ] **MCP only:** motion_server running, **and** mcp_server.py running
+- [ ] *(Optional)* `pip install aiortc av` for WebRTC streaming — smoother
+  preview than MJPEG. Already included in `benchmarks/requirements.txt`,
+  but PyAV's FFmpeg wheel is a chunky install, so skip on machines that
+  only run the CLI runner.
 
 Common env vars (cameras):
 
@@ -844,6 +848,15 @@ transport (`fci:...`, `rest:...`, `mcp:...`). Motion overhead shows up in
   manually and paste the `response` repr — one extra branch fixes it.
 - **REST per-row time clamps.** Server enforces `tf ∈ [0.5, ∞)`; below 0.5 s
   is silently floored. Above 5 s is fine.
+- **Dashboard tile says `[mjpeg]` even after installing aiortc.** Two usual
+  causes: (1) `aiortc` / `av` aren't visible to the venv the dashboard is
+  running in — re-run `pip install aiortc av` inside the same venv and
+  check the startup log for `WebRTC enabled`. (2) The browser couldn't
+  reach the workstation directly (e.g. across a NAT) — WebRTC needs a
+  routable path; on a flat LAN this is automatic, off-LAN you need an SSH
+  tunnel or a STUN server. The page already falls back to MJPEG so the
+  preview keeps working; check the browser console for `webrtc ... failed`
+  to confirm.
 
 The runner prompts you per-trial to set up the scene + randomize the external
 camera, then asks for the success grade after each trial. Results stream to

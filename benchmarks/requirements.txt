@@ -6,3 +6,8 @@ opencv-python
 flask
 pyrealsense2 ; sys_platform == "linux"
 panda-python ; sys_platform == "linux"
+# Optional: WebRTC streaming for the dashboard (faster preview than MJPEG).
+# Skip if you only run the CLI runner or are happy with MJPEG previews;
+# these pull in PyAV / bundled FFmpeg wheels which are a noticeable install.
+aiortc
+av
