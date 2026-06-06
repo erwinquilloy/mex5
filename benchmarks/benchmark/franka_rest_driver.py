@@ -46,6 +46,14 @@ Tunable via env vars (all optional):
                                         +x of the TCP). Default 0.
     FRANKA_BENCH_REST_CAM_DZ_M          same idea for Z (cam above TCP), also
                                         terminal-only. Default 0.
+    FRANKA_BENCH_REST_CAM_OFFSET_MODE   when the DX/DZ shift fires:
+                                        grasp_terminal (default) — last row of
+                                        the grasp chunk only;
+                                        every_terminal — last row of every
+                                        chunk;
+                                        always — every row of every chunk
+                                        (use for whole-trajectory perception
+                                        bias, not small geometric offsets).
     FRANKA_BENCH_REST_FAST_STEP_TIME_S  per-row motion time used when the
                                         commanded TCP Z is at/above
                                         FRANKA_BENCH_REST_SLOW_ZONE_Z_M. Free
@@ -152,6 +160,18 @@ class FrankaRestDriver:
         # by the same offset so the gripper lands where the cam sees the object.
         self._cam_dx_m = float(os.environ.get("FRANKA_BENCH_REST_CAM_DX_M", "0.0"))
         self._cam_dz_m = float(os.environ.get("FRANKA_BENCH_REST_CAM_DZ_M", "0.0"))
+        # When the cam offset fires:
+        #   grasp_terminal (default) — last row of the grasp chunk only
+        #   every_terminal           — last row of every chunk
+        #   always                   — every row of every chunk
+        # See README "Tuning the cam offset" for which to pick.
+        _mode = os.environ.get("FRANKA_BENCH_REST_CAM_OFFSET_MODE", "grasp_terminal").strip().lower()
+        if _mode not in ("grasp_terminal", "every_terminal", "always"):
+            raise ValueError(
+                f"FRANKA_BENCH_REST_CAM_OFFSET_MODE={_mode!r}; expected one of "
+                "'grasp_terminal', 'every_terminal', 'always'."
+            )
+        self._cam_offset_mode = _mode
 
         # Two-phase approach speed. When BOTH env vars are set, rows whose FK'd
         # target TCP Z is at or above SLOW_ZONE_Z_M use FAST_STEP_TIME_S
@@ -331,9 +351,9 @@ class FrankaRestDriver:
             return
         slow_t_sec = float(step_dt_s if step_dt_s is not None else self._step_time_s)
         last_idx = len(actions) - 1
-        # Only the chunk that actually grasps gets the wrist-cam → TCP offset:
-        # mid-trajectory chunks (gripper stays open) don't need alignment
-        # correction and applying it there warps the approach path.
+        # Cam-offset gating depends on the configured mode. See __init__ for
+        # the mode semantics. is_grasp_chunk is only consulted in
+        # 'grasp_terminal' mode but compute it once either way; cheap.
         is_grasp_chunk = bool(actions[last_idx, 7] >= grip_threshold)
         two_phase = self._fast_step_time_s is not None and self._slow_zone_z_m is not None
         if two_phase:
@@ -350,11 +370,17 @@ class FrankaRestDriver:
                         t_sec = self._fast_step_time_s  # type: ignore[assignment]
                 except Exception:
                     pass
+            if self._cam_offset_mode == "always":
+                cam_offset = True
+            elif self._cam_offset_mode == "every_terminal":
+                cam_offset = (i == last_idx)
+            else:  # grasp_terminal
+                cam_offset = (i == last_idx and is_grasp_chunk)
             self._move_to_q(
                 q_target,
                 t_sec=t_sec,
                 lock_down=lock_gripper_down,
-                apply_cam_offset=(i == last_idx and is_grasp_chunk),
+                apply_cam_offset=cam_offset,
             )
 
     # ----- lifecycle -----

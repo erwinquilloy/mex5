@@ -9,13 +9,19 @@ cartesian deltas. panda_py talks to libfranka directly and is what
 franka/python/basic.py already uses on this rig.
 
 Tunable via env vars (all optional):
-    FRANKA_BENCH_FCI_CAM_DX_M   wrist-cam → TCP X offset in base frame, applied
-                                ONLY to the terminal row of each chunk. FK the
-                                row's joints → shift TCP X → IK back with the
-                                previous row as seed. Set to the camera's
-                                forward offset from the gripper (e.g. 0.08).
-                                Default 0.
-    FRANKA_BENCH_FCI_CAM_DZ_M   same idea for Z (cam above TCP). Default 0.
+    FRANKA_BENCH_FCI_CAM_DX_M           wrist-cam → TCP X offset in base
+                                        frame. Set to the camera's forward
+                                        offset from the gripper (e.g. 0.08).
+                                        Default 0.
+    FRANKA_BENCH_FCI_CAM_DZ_M           same idea for Z. Default 0.
+    FRANKA_BENCH_FCI_CAM_OFFSET_MODE    when the DX/DZ shift fires:
+                                        grasp_terminal (default) — last row
+                                        of the grasp chunk only (gripper
+                                        closes); every_terminal — last row
+                                        of every chunk; always — every row
+                                        of every chunk (constant TCP frame
+                                        shift; use for whole-trajectory
+                                        perception bias).
 """
 from __future__ import annotations
 
@@ -84,10 +90,21 @@ class PandaDriver:
         except Exception:
             pass
 
-        # Wrist-cam → TCP offsets in the robot base frame. Applied only to the
-        # last row of each chunk, mirroring FrankaRestDriver. See module docstring.
+        # Wrist-cam → TCP offsets in the robot base frame. Applied per
+        # FRANKA_BENCH_FCI_CAM_OFFSET_MODE, mirroring FrankaRestDriver:
+        #   grasp_terminal (default) — last row of grasp chunks only (FK→shift→IK)
+        #   every_terminal           — last row of every chunk (FK→shift→IK)
+        #   always                   — every row of every chunk (FK→shift→IK each)
+        # See module docstring + README.
         self._cam_dx_m = float(os.environ.get("FRANKA_BENCH_FCI_CAM_DX_M", "0.0"))
         self._cam_dz_m = float(os.environ.get("FRANKA_BENCH_FCI_CAM_DZ_M", "0.0"))
+        _mode = os.environ.get("FRANKA_BENCH_FCI_CAM_OFFSET_MODE", "grasp_terminal").strip().lower()
+        if _mode not in ("grasp_terminal", "every_terminal", "always"):
+            raise ValueError(
+                f"FRANKA_BENCH_FCI_CAM_OFFSET_MODE={_mode!r}; expected one of "
+                "'grasp_terminal', 'every_terminal', 'always'."
+            )
+        self._cam_offset_mode = _mode
 
     # ----- state -----
 
@@ -167,46 +184,64 @@ class PandaDriver:
         grip_threshold: float = 0.5,
         max_joint_jump_rad: float = 0.5,
     ) -> np.ndarray:
-        """Shift only the last row's TCP X/Z by self._cam_d{x,z}_m via FK→shift→IK.
+        """Shift commanded TCP X/Z by self._cam_d{x,z}_m via FK→shift→IK.
 
-        Seeded with the previous row's joints (or current state if N==1) so the
-        IK solution stays on the same branch and the substep interpolator can
-        ramp smoothly into it. Falls back to the original row if IK fails or
-        jumps more than ``max_joint_jump_rad`` per joint.
+        Which rows get shifted is set by self._cam_offset_mode:
+          'grasp_terminal' — terminal row of grasp chunks only (gripper closes)
+          'every_terminal' — terminal row of every chunk
+          'always'         — every row of every chunk (constant TCP frame shift
+                             across the whole trajectory)
 
-        Only runs on the **grasp chunk** — the chunk whose terminal row commands
-        a closed gripper. Approach chunks (gripper stays open) bypass the
-        shift so the learned trajectory shape isn't distorted mid-motion.
+        For each shifted row: FK the joints, shift TCP X/Z, IK back seeded
+        with the previous accepted row's joints so the solver stays on the
+        same branch. Falls back to the original joints if IK fails or jumps
+        more than ``max_joint_jump_rad`` per joint.
         """
         if self._cam_dx_m == 0.0 and self._cam_dz_m == 0.0:
             return actions
-        if len(actions) == 0 or float(actions[-1, 7]) < grip_threshold:
+        if len(actions) == 0:
+            return actions
+        if self._cam_offset_mode == "grasp_terminal" and float(actions[-1, 7]) < grip_threshold:
             return actions
         try:
             import panda_py
         except Exception:
             return actions
+
+        if self._cam_offset_mode == "always":
+            indices = list(range(len(actions)))
+        else:
+            indices = [len(actions) - 1]  # both *_terminal modes shift only the last row
+
         out = actions.copy()
-        try:
-            if len(actions) >= 2:
-                seed = np.asarray(actions[-2, :7], dtype=np.float64)
-            else:
-                seed = np.asarray(self._panda.get_state().q, dtype=np.float64)
-            q_last = np.asarray(actions[-1, :7], dtype=np.float64)
-            pose = panda_py.fk(q_last)
-            pose[0, 3] += self._cam_dx_m
-            pose[2, 3] += self._cam_dz_m
+        # Seed for the first shifted row's IK: either the previous (unshifted) row's
+        # joints or current state when N==1 / shifting from index 0.
+        if indices[0] == 0:
             try:
-                q_new = panda_py.ik(pose, seed)
-            except TypeError:
-                q_new = panda_py.ik(pose)
-            if q_new is None or np.any(np.isnan(q_new)):
-                return out
-            if np.max(np.abs(q_new - seed)) > max_joint_jump_rad:
-                return out
-            out[-1, :7] = q_new
-        except Exception:
-            pass
+                seed = np.asarray(self._panda.get_state().q, dtype=np.float64)
+            except Exception:
+                seed = np.asarray(actions[0, :7], dtype=np.float64)
+        else:
+            seed = np.asarray(actions[indices[0] - 1, :7], dtype=np.float64)
+
+        for idx in indices:
+            try:
+                q_row = np.asarray(actions[idx, :7], dtype=np.float64)
+                pose = panda_py.fk(q_row)
+                pose[0, 3] += self._cam_dx_m
+                pose[2, 3] += self._cam_dz_m
+                try:
+                    q_new = panda_py.ik(pose, seed)
+                except TypeError:
+                    q_new = panda_py.ik(pose)
+                if q_new is None or np.any(np.isnan(q_new)):
+                    continue
+                if np.max(np.abs(q_new - seed)) > max_joint_jump_rad:
+                    continue
+                out[idx, :7] = q_new
+                seed = q_new
+            except Exception:
+                continue
         return out
 
     def send_chunk(
