@@ -640,7 +640,37 @@ python -m benchmarks.scripts.run_droid_benchmark \
     --tasks apple_on_plate --trials 1
 ```
 
-### 6. Compare
+### 6. (Optional) Watch the cameras while the benchmark runs
+
+The runner doesn't open any windows — it just owns the cameras and
+writes the latest captured frames to `/dev/shm` after every grab. A
+companion script (`serve_live.py`) reads those files and serves them as
+MJPEG over HTTP, so you can watch what the model is seeing from a
+browser without touching the benchmark's RT control threads.
+
+In a **separate terminal** (any time — before, during, or after the
+benchmark starts):
+```bash
+cd ~/erwin/mex5
+python -m benchmarks.scripts.serve_live --port 8080
+```
+
+Then open `http://<workstation-ip>:8080/` in a browser. Two MJPEG tiles:
+external webcam + wrist RealSense (RGB). The page refreshes at ~10 fps;
+if a tile stays blank, the benchmark hasn't grabbed a frame yet for that
+camera (or the camera index/serial is wrong — see step 4).
+
+This is also what the start-of-run log line is pointing you at:
+```
+INFO bench.droid live cam view: run python -m benchmarks.scripts.serve_live
+in another shell, then open http://<workstation-ip>:8080/
+```
+
+`serve_live` is read-only; it can't drive the robot or change behavior.
+For the interactive "type-an-instruction-and-run" experience, see the
+separate **Dashboard** section above (`serve_dashboard.py`).
+
+### 7. Compare
 
 ```bash
 ls -lt benchmarks/results/ | head -5
@@ -739,7 +769,7 @@ benchmarks/
   scripts/
     run_droid_benchmark.py             PRIMARY: Table 6 zero-shot eval (--transport {fci,rest,mcp})
     serve_dashboard.py                 interactive web UI: streams + Home + task input
-    serve_live.py                      legacy passive MJPEG viewer (reads tmpfs)
+    serve_live.py                      passive MJPEG viewer for the CLI runner (reads /dev/shm)
     compare_runs.py                    side-by-side table across N result JSONs
     run_benchmark.py                   legacy
   results/                             per-run JSON dumps
