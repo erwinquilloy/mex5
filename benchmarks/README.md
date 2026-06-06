@@ -375,9 +375,14 @@ FRANKA_BENCH_EXT_INDEX=0 FRANKA_MCP_URL=http://<mcp host>:8085/franka python -m 
    constraints in the prerequisites still apply — switching to FCI while
    motion_server is running will fail loudly).
 4. Click **home** to reset the arm.
-5. Type an instruction (e.g. *"pick up the apple and put it on the plate"*),
-   click **run one chunk**. The dashboard captures, runs inference, and
-   executes the returned action chunk. Click again to keep going.
+5. Type an instruction (e.g. *"Put the apple on the plate."*), click
+   **run trial**. The dashboard loops capture→infer→exec up to
+   `--max-chunks` chunks (default 30, same as the CLI runner), so a
+   single click runs the whole trial. Watch the status line for
+   `chunk N/30` progress.
+6. Click **stop** at any time to break out at the next chunk boundary
+   (the in-flight chunk finishes its motion first; the loop doesn't
+   resume).
 
 Stop the dashboard with Ctrl-C in its terminal; it closes the driver and
 releases the cameras.
@@ -391,20 +396,64 @@ releases the cameras.
 | `--transport {fci,rest,mcp}` | autodetect | override env-var selection |
 | `--rest-step-time-s` | `2.5` | per-row REST move time (REST/MCP only) |
 | `--exec-rows` | `3` | rows of each chunk to run when the policy is in fine-refinement mode |
-| `--mjpeg-fps` | `10.0` | dashboard refresh rate |
+| `--max-chunks` | `30` | safety cap on chunks per **run trial** click. Mirrors the CLI runner's `--max-chunks`. |
+| `--mjpeg-fps` | `10.0` | MJPEG fallback refresh rate (ignored when WebRTC is active) |
+| `--no-webrtc` | off | force MJPEG streaming even if `aiortc` is installed (debugging aid) |
 
 ### Dashboard vs CLI runner
 
 | Need | Use |
 |---|---|
-| Quick "type and try" with one instruction | dashboard |
-| Live camera streams in a browser | dashboard |
+| Quick "type an instruction and watch the arm try it" | dashboard |
+| Live camera streams in a browser (WebRTC or MJPEG) | dashboard |
+| Single-trial loop (capture→infer→exec up to `--max-chunks`) | either — dashboard's **run trial** does this too now |
 | Reproduce Table 6 with N trials, per-task scoring, results JSON | CLI runner |
-| Auto-home between trials with operator-graded success | CLI runner |
+| Auto-home + operator-graded success between trials | CLI runner |
+| `--hold-until-target` debug guard | CLI runner only |
 
 The two share the same drivers (`PandaDriver` / `FrankaRestDriver` /
 `FrankaMcpDriver`) and the same `DroidClient`, so model+transport behavior is
 identical — the dashboard is just an interactive shell around them.
+
+#### Mutual exclusion — only one can run at a time
+
+The dashboard and the CLI runner can **never** run simultaneously,
+regardless of transport:
+
+- **RealSense.** `pyrealsense2` lets one process open the wrist cam at a
+  time. Both `DashboardCamera` and `DualCamera` call `pipeline.start()`
+  on the same serial; whichever starts second errors with a libuvc /
+  `Device or resource busy` style message.
+- **FCI.** `panda_py` and `motion_server` both hold FCI exclusively, so
+  even if you somehow avoided the camera clash you'd get
+  `Connection actively refused remote peer` from libfranka on the
+  second client.
+
+Symptoms when you forget:
+
+```
+# trying to start the CLI while the dashboard is up
+RuntimeError: Couldn't resolve requests
+# or
+RuntimeError: libfranka: Connection error: Connection actively refused...
+```
+
+Switching between the two cleanly:
+
+```bash
+# dashboard -> CLI
+# (Ctrl-C the dashboard terminal, wait a beat for the cams to release)
+python -m benchmarks.scripts.run_droid_benchmark --tasks apple_on_plate ...
+
+# CLI -> dashboard
+pkill -f run_droid_benchmark        # or Ctrl-C the runner
+python -m benchmarks.scripts.serve_dashboard --port 8080
+```
+
+If you want the CLI's results-JSON-and-grading workflow **plus** a live
+browser view, run the CLI as usual and start `serve_live` (read-only
+camera viewer) alongside — that one connects to the dashboard-less live
+endpoints without claiming the cameras itself.
 
 ## End-to-end walkthrough (Linux workstation, fresh shell)
 
