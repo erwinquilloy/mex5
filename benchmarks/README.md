@@ -462,10 +462,14 @@ export FRANKA_BENCH_CAM_W=640              # RealSense D455 has no 256x256 mode
 export FRANKA_BENCH_CAM_H=480
 
 # Required on the lab rig (airscan4): the wrist RealSense sits ~8 cm forward
-# of the TCP, and the external tripod faces the robot (DROID canonical is
-# behind+above, so robot +Y maps to image-left — flip to compensate).
+# of the TCP and ~5 cm above the grasp plane, and the external tripod faces
+# the robot (DROID canonical is behind+above, so robot +Y maps to image-left
+# — flip to compensate). DZ is negative because the code adds the offset to
+# the commanded terminal Z, and we need TCP to descend further to grasp.
 export FRANKA_BENCH_REST_CAM_DX_M=0.08     # wrist-cam → TCP X offset (REST/MCP)
+export FRANKA_BENCH_REST_CAM_DZ_M=-0.05    # wrist-cam → TCP Z offset (REST/MCP)
 export FRANKA_BENCH_FCI_CAM_DX_M=0.08      # same for FCI (terminal-pose only)
+export FRANKA_BENCH_FCI_CAM_DZ_M=-0.05     # same for FCI
 export FRANKA_BENCH_EXT_FLIP_H=1           # mirror external view back to canonical
 
 # optional: FRANKA_BENCH_WRIST_SERIAL=<D457 serial> to pin the wrist cam
