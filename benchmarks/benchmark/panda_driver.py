@@ -36,6 +36,12 @@ import numpy as np
 _HOME_Q = np.array([0., -np.pi/4, 0., -3*np.pi/4, 0., np.pi/2, np.pi/4], dtype=np.float64)
 _GRIPPER_MAX_M = 0.08
 
+# airscan4 lab rig workspace safe box (base-frame metres). Cam-offset-shifted
+# poses are clamped into this box before re-IK so the cam shift can't push the
+# gripper past the rig's safe reach. Z is intentionally not clipped.
+_LAB_X_MIN, _LAB_X_MAX = 0.0, 0.57
+_LAB_Y_MIN, _LAB_Y_MAX = -0.4, 0.4
+
 
 @dataclass
 class DriverState:
@@ -230,6 +236,16 @@ class PandaDriver:
                 pose = panda_py.fk(q_row)
                 pose[0, 3] += self._cam_dx_m
                 pose[2, 3] += self._cam_dz_m
+                x_pre, y_pre = float(pose[0, 3]), float(pose[1, 3])
+                pose[0, 3] = min(_LAB_X_MAX, max(_LAB_X_MIN, pose[0, 3]))
+                pose[1, 3] = min(_LAB_Y_MAX, max(_LAB_Y_MIN, pose[1, 3]))
+                if pose[0, 3] != x_pre or pose[1, 3] != y_pre:
+                    print(
+                        f"[PandaDriver] clamped cam-offset TCP target XY "
+                        f"({x_pre:+.3f}, {y_pre:+.3f}) -> "
+                        f"({float(pose[0,3]):+.3f}, {float(pose[1,3]):+.3f}) m to lab box "
+                        f"X[{_LAB_X_MIN:.2f},{_LAB_X_MAX:.2f}] Y[{_LAB_Y_MIN:+.2f},{_LAB_Y_MAX:+.2f}]"
+                    )
                 try:
                     q_new = panda_py.ik(pose, seed)
                 except TypeError:

@@ -86,6 +86,14 @@ _DEFAULT_HOME_TIME_S = 3.0
 _SERVER_MAX_DELTA_DEG = 90.0
 _SERVER_MIN_STEP_TIME_S = 0.5
 
+# airscan4 lab rig workspace safe box (base-frame metres). Every commanded
+# TCP X/Y gets clamped into this box before being sent to motion_server, so a
+# bad cam-offset or out-of-distribution policy output can't drive the gripper
+# past the rig's safe reach. Z is intentionally not clipped — the slow-zone
+# logic and table contact handle Z.
+_LAB_X_MIN, _LAB_X_MAX = 0.0, 0.57
+_LAB_Y_MIN, _LAB_Y_MAX = -0.4, 0.4
+
 
 @dataclass
 class DriverState:
@@ -307,6 +315,15 @@ class FrankaRestDriver:
         if apply_cam_offset:
             x_t += self._cam_dx_m
             z_t += self._cam_dz_m
+        x_clipped = min(_LAB_X_MAX, max(_LAB_X_MIN, x_t))
+        y_clipped = min(_LAB_Y_MAX, max(_LAB_Y_MIN, y_t))
+        if x_clipped != x_t or y_clipped != y_t:
+            print(
+                f"[FrankaRestDriver] clamped TCP target XY ({x_t:+.3f}, {y_t:+.3f}) "
+                f"-> ({x_clipped:+.3f}, {y_clipped:+.3f}) m to lab box "
+                f"X[{_LAB_X_MIN:.2f},{_LAB_X_MAX:.2f}] Y[{_LAB_Y_MIN:+.2f},{_LAB_Y_MAX:+.2f}]"
+            )
+        x_t, y_t = x_clipped, y_clipped
         a_c, b_c, g_c = _zyx_euler_from_R(T_cur[:3, :3])
         a_t, b_t, g_t = _zyx_euler_from_R(T_tgt[:3, :3])
 

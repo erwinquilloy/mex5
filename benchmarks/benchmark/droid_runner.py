@@ -19,6 +19,44 @@ from .transport import make_driver
 log = logging.getLogger("bench.droid")
 
 
+# Franka gripper width thresholds. Fully open ≈ 0.08 m, fully closed ≈ 0.0 m.
+# Anything in between means the jaws stopped on an object — i.e. holding.
+_HOLDING_WIDTH_MIN_M = 0.005
+_HOLDING_WIDTH_MAX_M = 0.075
+
+
+def _is_holding(width: float) -> bool:
+    return _HOLDING_WIDTH_MIN_M < width < _HOLDING_WIDTH_MAX_M
+
+
+def _row_tcp_xy(q_row: np.ndarray) -> tuple[float, float]:
+    import panda_py
+    T = panda_py.fk(np.asarray(q_row[:7], dtype=np.float64))
+    return float(T[0, 3]), float(T[1, 3])
+
+
+def _enforce_hold_until_target(
+    actions: np.ndarray,
+    width: float,
+    target_zone: tuple[float, float, float, float],
+    grip_threshold: float = 0.5,
+) -> int:
+    """Suppress policy-commanded gripper-opens while holding an object outside
+    the target zone. Mutates ``actions[:, 7]`` in place; returns the number of
+    rows that got overridden. No-op when the gripper isn't holding anything."""
+    if not _is_holding(width):
+        return 0
+    xmin, xmax, ymin, ymax = target_zone
+    suppressed = 0
+    for i in range(len(actions)):
+        if actions[i, 7] < grip_threshold:
+            x, y = _row_tcp_xy(actions[i])
+            if not (xmin <= x <= xmax and ymin <= y <= ymax):
+                actions[i, 7] = 1.0
+                suppressed += 1
+    return suppressed
+
+
 def _prompt_setup(task: DroidTask, trial: int) -> bool:
     print("\n" + "=" * 70)
     print(f"[{task.task_id}] trial {trial + 1}/{task.trials}")
@@ -53,7 +91,15 @@ def run_trial(
     grasp_commit_grip_frac: float = 0.5,
     fine_refinement_travel_rad: float = 0.2,
     max_chunks: Optional[int] = None,
+    hold_until_target: bool = False,
 ) -> TrialRecord:
+    if hold_until_target and task.target_zone_xy is None:
+        raise ValueError(
+            f"--hold-until-target was set but task {task.task_id!r} has no "
+            "target_zone_xy defined in droid_tasks.py. Either define the box "
+            "(xmin, xmax, ymin, ymax in metres, base frame) or run without "
+            "the flag."
+        )
     rec = TrialRecord(task_id=task.task_id, trial=trial, success=False, n_steps=0, wallclock_s=0.0)
     panda.home()
     if not _prompt_setup(task, trial):
@@ -100,6 +146,19 @@ def run_trial(
             rows_to_run = pred.actions[:max(1, exec_rows)]
         else:
             rows_to_run = pred.actions
+        if hold_until_target:
+            # Copy so we don't pollute pred.actions (the model's raw output, which
+            # later logging and analysis may want to see verbatim).
+            rows_to_run = np.asarray(rows_to_run, dtype=np.float64).copy()
+            n_suppressed = _enforce_hold_until_target(
+                rows_to_run, float(state8[7]), task.target_zone_xy,  # type: ignore[arg-type]
+            )
+            if n_suppressed > 0:
+                log.warning(
+                    "hold-until-target: kept gripper closed on %d/%d row(s) "
+                    "(%s/#%d) — policy tried to release outside target zone",
+                    n_suppressed, len(rows_to_run), task.task_id, trial,
+                )
         lock_down = os.environ.get("FRANKA_BENCH_LOCK_GRIPPER_DOWN", "0") not in ("0", "", "false", "False")
         with exec_sw():
             panda.send_chunk(
@@ -143,6 +202,7 @@ def run_droid_benchmark(
     rest_port: int = 34568,
     rest_step_time_s: float = 2.5,
     mcp_url: Optional[str] = None,
+    hold_until_target: bool = False,
 ) -> RunRecord:
     client = DroidClient(molmoact_url)
     health = client.health()
@@ -183,7 +243,8 @@ def run_droid_benchmark(
                                    exec_rows=exec_rows,
                                    grasp_commit_grip_frac=grasp_commit_grip_frac,
                                    fine_refinement_travel_rad=fine_refinement_travel_rad,
-                                   max_chunks=max_chunks)
+                                   max_chunks=max_chunks,
+                                   hold_until_target=hold_until_target)
                 except KeyboardInterrupt:
                     log.warning("aborted by operator at %s/#%d", task.task_id, trial)
                     raise

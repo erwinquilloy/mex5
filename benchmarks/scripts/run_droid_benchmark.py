@@ -67,6 +67,15 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--mcp-url", default=None,
                     help="MCP server URL for --transport=mcp (or FRANKA_MCP_URL). "
                          "Default per franka/python/mcp_server.py: http://<host>:8085/franka.")
+    ap.add_argument("--hold-until-target", action="store_true",
+                    help="Safety override: while the gripper is holding an object "
+                         "(Franka width between fully-closed and fully-open), "
+                         "suppress any policy-commanded release whose target XY "
+                         "falls outside the task's target_zone_xy box. Biases "
+                         "the benchmark vs. zero-shot Table 6 numbers; use for "
+                         "debugging or demos, not for paper-replication runs. "
+                         "Each task that's used with this flag must have "
+                         "target_zone_xy set in droid_tasks.py.")
     args = ap.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO,
@@ -89,6 +98,7 @@ def main(argv: list[str] | None = None) -> int:
         rest_port=args.rest_port,
         rest_step_time_s=args.rest_step_time_s,
         mcp_url=args.mcp_url,
+        hold_until_target=args.hold_until_target,
     )
     summary = run.summary()
     print("\n===== SUMMARY =====")

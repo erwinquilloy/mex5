@@ -11,6 +11,7 @@ rig has only a wrist camera. Numbers will deviate from the paper. See
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Optional
 
 
 @dataclass
@@ -21,6 +22,14 @@ class DroidTask:
     paper_success_rate: float   # MolmoAct2-DROID reference % from Table 6
     trials: int = 15
     max_chunks: int = 30        # safety cap on action chunks per trial
+    # Base-frame XY box of the placement target (xmin, xmax, ymin, ymax in metres).
+    # Used ONLY when run_droid_benchmark is invoked with --hold-until-target, in
+    # which case the runner suppresses any policy-commanded gripper-open whose
+    # commanded TCP XY falls outside this box (while an object is detected in
+    # the jaws). Leave None for tasks where you haven't measured the target
+    # location yet; with --hold-until-target the runner will error rather than
+    # guess.
+    target_zone_xy: Optional[tuple[float, float, float, float]] = None
 
 
 # Reference numbers: MolmoAct2-DROID column of Table 6.

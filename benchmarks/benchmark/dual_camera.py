@@ -107,12 +107,20 @@ class DualCamera:
         external_rotation_deg: int = 0,
         external_flip_h: bool = False,
         external_flip_v: bool = False,
+        wrist_rotation_deg: int = 0,
+        wrist_flip_h: bool = False,
+        wrist_flip_v: bool = False,
     ):
         if external_rotation_deg not in _VALID_ROT:
             raise ValueError(f"external_rotation_deg must be one of {_VALID_ROT}")
+        if wrist_rotation_deg not in _VALID_ROT:
+            raise ValueError(f"wrist_rotation_deg must be one of {_VALID_ROT}")
         self._ext_rot = external_rotation_deg
         self._ext_flip_h = bool(external_flip_h)
         self._ext_flip_v = bool(external_flip_v)
+        self._wrist_rot = wrist_rotation_deg
+        self._wrist_flip_h = bool(wrist_flip_h)
+        self._wrist_flip_v = bool(wrist_flip_v)
         self._wrist = _RealsenseWrist(wrist_serial, width, height, fps)
         self._external = None
         self._static_ext = None
@@ -138,6 +146,10 @@ class DualCamera:
             ext = _rotate(ext, self._ext_rot)
         if self._ext_flip_h or self._ext_flip_v:
             ext = _apply_flips(ext, self._ext_flip_h, self._ext_flip_v)
+        if self._wrist_rot:
+            wrist = _rotate(wrist, self._wrist_rot)
+        if self._wrist_flip_h or self._wrist_flip_v:
+            wrist = _apply_flips(wrist, self._wrist_flip_h, self._wrist_flip_v)
         return Frames(external=ext, wrist=wrist, t_grab_ms=(time.perf_counter() - t0) * 1000.0)
 
     def close(self) -> None:
@@ -160,4 +172,7 @@ def from_env() -> DualCamera:
         external_rotation_deg=int(os.environ.get("FRANKA_BENCH_EXT_ROT_DEG", "0")),
         external_flip_h=os.environ.get("FRANKA_BENCH_EXT_FLIP_H", "0") not in ("0", "", "false", "False"),
         external_flip_v=os.environ.get("FRANKA_BENCH_EXT_FLIP_V", "0") not in ("0", "", "false", "False"),
+        wrist_rotation_deg=int(os.environ.get("FRANKA_BENCH_WRIST_ROT_DEG", "0")),
+        wrist_flip_h=os.environ.get("FRANKA_BENCH_WRIST_FLIP_H", "0") not in ("0", "", "false", "False"),
+        wrist_flip_v=os.environ.get("FRANKA_BENCH_WRIST_FLIP_V", "0") not in ("0", "", "false", "False"),
     )
