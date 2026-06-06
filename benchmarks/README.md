@@ -131,7 +131,7 @@ Workspace prep:
 Common env vars (cameras + model server):
 
 ```bash
-export FRANKA_BENCH_EXT_INDEX=6          # USB webcam (NOT the RealSense node)
+export FRANKA_BENCH_EXT_INDEX=0          # USB webcam (NOT the RealSense node)
 # RealSense D455 has no 256x256 mode; use a native resolution
 export FRANKA_BENCH_CAM_W=640
 export FRANKA_BENCH_CAM_H=480
@@ -534,7 +534,7 @@ home manually.
 ### 4. Camera env vars (all transports)
 
 ```bash
-export FRANKA_BENCH_EXT_INDEX=6            # USB webcam (NOT the RealSense /dev/video* node)
+export FRANKA_BENCH_EXT_INDEX=0            # USB webcam (NOT the RealSense /dev/video* node)
 export FRANKA_BENCH_CAM_W=640              # RealSense D455 has no 256x256 mode
 export FRANKA_BENCH_CAM_H=480
 
