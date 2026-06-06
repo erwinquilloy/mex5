@@ -48,6 +48,8 @@ def main(argv: list[str] | None = None) -> int:
                     help="when at least this fraction of the chunk commands gripper-close, run the WHOLE chunk instead of just --exec-rows (don't interrupt a grasp).")
     ap.add_argument("--fine-refinement-travel-rad", type=float, default=0.2,
                     help="if total joint-space travel within a chunk is below this (radians), treat as fine refinement and only run --exec-rows. Larger chunks are run full open-loop. Default 0.2 ~= 11 deg total chunk travel.")
+    ap.add_argument("--max-chunks", type=int, default=None,
+                    help="override the per-task safety cap on action chunks per trial (default per droid_tasks.py: 30). Raise this when using small --exec-rows so the trial doesn't run out of budget before the policy finishes.")
     ap.add_argument("--results-dir", default="benchmarks/results")
     ap.add_argument("--transport", choices=["fci", "rest", "mcp"], default="fci",
                     help="fci = direct panda_py/libfranka (default, joint-position streaming). "
@@ -81,6 +83,7 @@ def main(argv: list[str] | None = None) -> int:
         exec_rows=args.exec_rows,
         grasp_commit_grip_frac=args.grasp_commit_grip_frac,
         fine_refinement_travel_rad=args.fine_refinement_travel_rad,
+        max_chunks=args.max_chunks,
         transport=args.transport,
         rest_host=args.rest_host,
         rest_port=args.rest_port,

@@ -52,6 +52,7 @@ def run_trial(
     exec_rows: int = 3,
     grasp_commit_grip_frac: float = 0.5,
     fine_refinement_travel_rad: float = 0.2,
+    max_chunks: Optional[int] = None,
 ) -> TrialRecord:
     rec = TrialRecord(task_id=task.task_id, trial=trial, success=False, n_steps=0, wallclock_s=0.0)
     panda.home()
@@ -62,7 +63,8 @@ def run_trial(
     t_start = time.perf_counter()
     chunk_sw, exec_sw = Stopwatch(), Stopwatch()
 
-    for chunk_i in range(task.max_chunks):
+    chunk_budget = max_chunks if max_chunks is not None else task.max_chunks
+    for chunk_i in range(chunk_budget):
         e2e_t0 = time.perf_counter()
         with chunk_sw():
             frames: Frames = camera.grab()
@@ -135,6 +137,7 @@ def run_droid_benchmark(
     exec_rows: int = 3,
     grasp_commit_grip_frac: float = 0.5,
     fine_refinement_travel_rad: float = 0.2,
+    max_chunks: Optional[int] = None,
     transport: str = "fci",
     rest_host: Optional[str] = None,
     rest_port: int = 34568,
@@ -179,7 +182,8 @@ def run_droid_benchmark(
                                    chunk_step_dt_s=chunk_step_dt_s,
                                    exec_rows=exec_rows,
                                    grasp_commit_grip_frac=grasp_commit_grip_frac,
-                                   fine_refinement_travel_rad=fine_refinement_travel_rad)
+                                   fine_refinement_travel_rad=fine_refinement_travel_rad,
+                                   max_chunks=max_chunks)
                 except KeyboardInterrupt:
                     log.warning("aborted by operator at %s/#%d", task.task_id, trial)
                     raise

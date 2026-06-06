@@ -554,7 +554,7 @@ settings:
 python -m benchmarks.scripts.run_droid_benchmark \
     --transport fci --tasks apple_on_plate --trials 1 \
     --exec-rows 2 --fine-refinement-travel-rad 5.0 \
-    --chunk-step-dt 0.2
+    --chunk-step-dt 0.2 --max-chunks 120
 ```
 
 What each one does:
@@ -564,6 +564,7 @@ What each one does:
 | `--exec-rows` | `3` | `2` | Number of rows to run before re-perceiving + re-inferring. Lower = more closed-loop, less overshoot. |
 | `--fine-refinement-travel-rad` | `0.2` | `5.0` | Below this much total joint travel (rad), the chunk is treated as fine refinement and `--exec-rows` applies. Default only triggers on tiny refinement chunks; raise it so almost every non-grasp chunk runs receding-horizon. |
 | `--chunk-step-dt` | `0.1` | `0.2` | Commanded duration per action row (sec). Doubling halves average joint velocity, which makes the substep ramp longer and softens chunk-end decel. |
+| `--max-chunks` | task default (30) | `120` | Per-trial safety cap on action chunks. With `--exec-rows 2`, each chunk advances 4× less than the default 8 rows, so you need ~4× more chunks before the policy actually finishes the task. Without this, trials hit the cap mid-grasp and the operator gets prompted for success on an unfinished motion. |
 | `--grasp-commit-grip-frac` | `0.5` | `0.5` | When ≥ this fraction of a chunk's rows command gripper-close, run the whole chunk uninterrupted (don't break a grasp mid-flight). Leave alone. |
 
 Trade-off: ~3–4× more inference calls per trial → a few extra seconds end-to-end,
