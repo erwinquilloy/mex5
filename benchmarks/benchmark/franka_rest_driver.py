@@ -310,6 +310,10 @@ class FrankaRestDriver:
             return
         t_sec = float(step_dt_s if step_dt_s is not None else self._step_time_s)
         last_idx = len(actions) - 1
+        # Only the chunk that actually grasps gets the wrist-cam → TCP offset:
+        # mid-trajectory chunks (gripper stays open) don't need alignment
+        # correction and applying it there warps the approach path.
+        is_grasp_chunk = bool(actions[last_idx, 7] >= grip_threshold)
         for i, row in enumerate(actions):
             q_target = row[:7]
             close = bool(row[7] >= grip_threshold)
@@ -318,7 +322,7 @@ class FrankaRestDriver:
                 q_target,
                 t_sec=t_sec,
                 lock_down=lock_gripper_down,
-                apply_cam_offset=(i == last_idx),
+                apply_cam_offset=(i == last_idx and is_grasp_chunk),
             )
 
     # ----- lifecycle -----

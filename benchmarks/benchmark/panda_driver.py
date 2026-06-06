@@ -164,6 +164,7 @@ class PandaDriver:
     def _apply_cam_offset_to_terminal(
         self,
         actions: np.ndarray,
+        grip_threshold: float = 0.5,
         max_joint_jump_rad: float = 0.5,
     ) -> np.ndarray:
         """Shift only the last row's TCP X/Z by self._cam_d{x,z}_m via FK→shift→IK.
@@ -172,8 +173,14 @@ class PandaDriver:
         IK solution stays on the same branch and the substep interpolator can
         ramp smoothly into it. Falls back to the original row if IK fails or
         jumps more than ``max_joint_jump_rad`` per joint.
+
+        Only runs on the **grasp chunk** — the chunk whose terminal row commands
+        a closed gripper. Approach chunks (gripper stays open) bypass the
+        shift so the learned trajectory shape isn't distorted mid-motion.
         """
         if self._cam_dx_m == 0.0 and self._cam_dz_m == 0.0:
+            return actions
+        if len(actions) == 0 or float(actions[-1, 7]) < grip_threshold:
             return actions
         try:
             import panda_py
@@ -234,7 +241,7 @@ class PandaDriver:
 
         if lock_gripper_down:
             actions = self._lock_orientation_downward(actions)
-        actions = self._apply_cam_offset_to_terminal(actions)
+        actions = self._apply_cam_offset_to_terminal(actions, grip_threshold=grip_threshold)
 
         nominal_sub = max(1, int(round(step_dt_s / max(substep_dt_s, 1e-3))))
 
