@@ -31,6 +31,7 @@ import numpy as np
 from flask import Flask, Response, jsonify, request
 
 from benchmarks.benchmark.dashboard_camera import DashboardCamera, from_env as camera_from_env
+from benchmarks.benchmark.driver_errors import CollisionAborted
 from benchmarks.benchmark.molmoact_droid_client import DroidClient
 from benchmarks.benchmark.transport import autodetect_transport, make_driver
 
@@ -174,12 +175,33 @@ class DashboardState:
                 num_steps=10,
             )
             rows = self._select_rows(pred.actions)
-            with self._driver_lock:
-                self.driver.send_chunk(
-                    rows,
-                    step_dt_s=self.step_dt_for_send_chunk(),
-                    lock_gripper_down=self.lock_gripper_down,
-                )
+            try:
+                with self._driver_lock:
+                    self.driver.send_chunk(
+                        rows,
+                        step_dt_s=self.step_dt_for_send_chunk(),
+                        lock_gripper_down=self.lock_gripper_down,
+                    )
+            except CollisionAborted as ca:
+                # Libfranka's reflex aborted the move (most commonly: gripper
+                # contacted the table). Stop the trial loop, send the arm
+                # home, and surface a clean status so the user can re-setup.
+                self._set_progress(0, 0)
+                home_error: Optional[str] = None
+                try:
+                    with self._driver_lock:
+                        self.driver.home()
+                except Exception as he:
+                    home_error = str(he)
+                return {
+                    "ok": False,
+                    "error": "collision detected; trial aborted",
+                    "stopped_by": "collision",
+                    "collision_detail": str(ca)[:300],
+                    "homed": home_error is None,
+                    "home_error": home_error,
+                    "chunks_done": chunks_done,
+                }
             chunks_done += 1
             last_pred_rows = int(len(pred.actions))
             last_exec_rows = int(len(rows))

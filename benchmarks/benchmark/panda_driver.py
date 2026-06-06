@@ -32,6 +32,8 @@ from typing import Optional
 
 import numpy as np
 
+from .driver_errors import CollisionAborted
+
 # panda_py constants
 _HOME_Q = np.array([0., -np.pi/4, 0., -3*np.pi/4, 0., np.pi/2, np.pi/4], dtype=np.float64)
 _GRIPPER_MAX_M = 0.08
@@ -298,6 +300,13 @@ class PandaDriver:
 
         ctrl = pc.JointPosition()
         self._panda.start_controller(ctrl)
+        # libfranka reflex (contact, velocity/accel discontinuity) raises out
+        # of ctrl.set_control or the controller lifecycle. Translate to
+        # CollisionAborted so the consumer loop can abort+home cleanly.
+        # _REFLEX_HINTS captures the substrings libfranka surfaces; the broad
+        # set avoids needing to depend on a specific panda_py exception class.
+        _REFLEX_HINTS = ("reflex", "collision", "discontinuity",
+                         "cartesian_motion_generator", "joint_motion_generator")
         try:
             prev_q = np.asarray(self._panda.get_state().q, dtype=np.float64)
             last_grip: Optional[bool] = None
@@ -322,6 +331,11 @@ class PandaDriver:
                     ctrl.set_control(q_interp)
                     time.sleep(substep_dt_s)
                 prev_q = q_target
+        except Exception as e:
+            msg = str(e).lower()
+            if any(h in msg for h in _REFLEX_HINTS):
+                raise CollisionAborted(f"FCI control reflex: {e}") from e
+            raise
         finally:
             try:
                 self._panda.stop_controller()
@@ -331,6 +345,18 @@ class PandaDriver:
     # ----- lifecycle -----
 
     def home(self) -> None:
+        # After a reflex, libfranka requires automaticErrorRecovery before
+        # the next motion is accepted. Safe to call when not in error state.
+        # Try both panda_py spellings; one of them is always present.
+        for attempt in (
+            lambda: self._panda.recover(),
+            lambda: self._panda.get_robot().automaticErrorRecovery(),
+        ):
+            try:
+                attempt()
+                break
+            except Exception:
+                continue
         self._panda.move_to_joint_position(_HOME_Q, speed_factor=0.3)
         try:
             self._gripper.move(_GRIPPER_MAX_M, 0.1)

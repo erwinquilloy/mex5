@@ -76,6 +76,8 @@ from typing import Optional, Sequence
 import numpy as np
 import requests
 
+from .driver_errors import CollisionAborted
+
 _HOME_Q = np.array([0., -np.pi/4, 0., -3*np.pi/4, 0., np.pi/2, np.pi/4], dtype=np.float64)
 _GRIPPER_MAX_M = 0.08
 _DEFAULT_REST_STEP_TIME_S = 2.5
@@ -210,8 +212,17 @@ class FrankaRestDriver:
             timeout=self._timeout_s,
         )
         if not r.ok:
+            text = r.text[:500]
+            # motion_server returns 400 with a "collision_recovery:" prefix when
+            # libfranka's reflex aborted the move (contact or motion-generator
+            # discontinuity). Surface that as a typed exception so trial loops
+            # can react (abort + home) instead of crashing.
+            if r.status_code == 400 and "collision_recovery" in text.lower():
+                raise CollisionAborted(
+                    f"motion_server reflex on {command}({params_f}): {text}"
+                )
             raise RuntimeError(
-                f"motion_server {r.status_code} on {command}({params_f}): {r.text[:500]}"
+                f"motion_server {r.status_code} on {command}({params_f}): {text}"
             )
         try:
             return r.json()
