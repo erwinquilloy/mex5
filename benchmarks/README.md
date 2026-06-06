@@ -481,6 +481,14 @@ Confirm the external index with `v4l2-ctl --list-devices` and pick the one
 
 ### 5. Pick a transport and run
 
+> **Always launch the benchmark from the repo root** (`~/erwin/mex5`).
+> `python -m benchmarks.scripts.run_droid_benchmark` resolves the
+> `benchmarks` package from your current directory — running it from
+> `franka/cpp/build/` (where motion_server lives) errors with
+> `ModuleNotFoundError: No module named 'benchmarks'`. Easiest pattern is
+> **one terminal per process**: motion_server stays in `franka/cpp/build/`,
+> the benchmark client stays in `~/erwin/mex5`.
+
 #### 5a. FCI (default — direct libfranka)
 
 Cleanup ritual — FCI is single-client, so anything else holding the robot
@@ -496,8 +504,9 @@ pgrep -af motion_server; pgrep -af run_droid_benchmark; pgrep -af serve_dashboar
 # (each line should return empty)
 ```
 
-Then run:
+Then run (from the repo root):
 ```bash
+cd ~/erwin/mex5
 export FRANKA_HOST=192.168.2.100           # robot FCI IP
 export FRANKA_USER=<real desk username>
 export FRANKA_PASS=<real desk password>
@@ -540,8 +549,10 @@ action in Desk; alternatively hand-guide it into a roughly extended pose
 or run `python -c "import os, panda_py; panda_py.Panda(os.environ['FRANKA_HOST']).move_to_start()"`
 in a separate (venv-activated) terminal, then re-run motion_server.
 
-Back in the benchmark terminal:
+Back in the benchmark terminal (must be at the repo root, not in
+`franka/cpp/build/` where you started motion_server):
 ```bash
+cd ~/erwin/mex5
 unset FRANKA_HOST                          # avoid transport confusion
 export FRANKA_REST_HOST=192.168.2.1        # motion_server box, NOT the robot
 
@@ -566,8 +577,9 @@ pip install fastmcp                        # one-time, on both boxes
 cd ~/erwin/mex5/franka/python && python3 mcp_server.py
 ```
 
-Benchmark terminal:
+Benchmark terminal (at the repo root):
 ```bash
+cd ~/erwin/mex5
 export FRANKA_MCP_URL=http://<mcp host>:8085/franka
 
 python -m benchmarks.scripts.run_droid_benchmark \
