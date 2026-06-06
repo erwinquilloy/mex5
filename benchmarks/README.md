@@ -520,6 +520,28 @@ export FRANKA_BENCH_EXT_FLIP_H=1           # mirror external view back to canoni
 Confirm the external index with `v4l2-ctl --list-devices` and pick the one
 **not** under "Intel RealSense".
 
+#### Cam-offset gating modes (advanced)
+
+The DX/DZ values above are applied per the env var
+`FRANKA_BENCH_REST_CAM_OFFSET_MODE` / `FRANKA_BENCH_FCI_CAM_OFFSET_MODE`.
+Default is `grasp_terminal`; the other two are opt-in for specific
+calibration scenarios. **Don't change this unless the default's behavior
+isn't matching what you observe.**
+
+| Mode | When the DX/DZ shift fires | Use when | Gotchas |
+|---|---|---|---|
+| `grasp_terminal` *(default)* | Last row of chunks whose terminal action commands gripper-close. | The model commits to a grasp on its own, you just need to fine-tune the close-pose alignment (small geometric wrist-cam→TCP offset). | If the model never produces a grasp chunk (it hovers/aborts), the offset never fires. Symptom: shift values change behavior at all only when the gripper closes. |
+| `every_terminal` | Last row of every chunk. | The model behaves like above but you want each chunk-boundary pose corrected too (e.g. when stretching small offsets across long approach trajectories). | Slightly warps the approach path; the policy "thinks" it ended row N at A but the robot ended at A + offset, so subsequent inference is on slightly different state. |
+| `always` | Every row of every chunk — a constant translation in the base frame applied to all commanded TCP poses. | Whole-trajectory perception bias correction (model's spatial estimate is consistently off by a few cm in X/Y/Z across the entire trial). Use when the model never even reaches grasp on its own and bias is roughly constant across workspace positions. | **FCI:** per-row FK→shift→IK can pick a different IK branch, causing gripper orientation to drift across the trajectory. Verify orientation on the wrist cam stream. **REST:** safe, but don't combine with `FAST_STEP_TIME_S=1.0` — first-chunk-from-home with 1.0 s tf + always shift trips `cartesian_motion_generator_joint_acceleration_discontinuity`. Either disable two-phase or raise `FAST_STEP_TIME_S` to ≥ 1.5. |
+
+To opt into one of the non-default modes (REST/MCP example):
+```bash
+export FRANKA_BENCH_REST_CAM_OFFSET_MODE=always   # or every_terminal
+export FRANKA_BENCH_REST_CAM_DX_M=-0.06           # whole-trajectory shift values
+export FRANKA_BENCH_REST_CAM_DZ_M=-0.08
+```
+Mirror with `FRANKA_BENCH_FCI_CAM_OFFSET_MODE` for FCI runs.
+
 ### 5. Pick a transport and run
 
 > **Always launch the benchmark from the repo root** (`~/erwin/mex5`).
