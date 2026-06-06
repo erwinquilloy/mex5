@@ -76,6 +76,29 @@ Then set `FRANKA_MCP_URL=http://<that host>:8085/franka` (or pass `--mcp-url`).
 - **Controller**: paper uses the DROID NUC + polymetis stack; we use `panda_py`
   directly. Same action space, different timing characteristics.
 
+## Tasks (Table 6 of arXiv:2605.02881)
+
+Five tasks × 15 trials each. The `task_id` column is what `--tasks` takes;
+pass multiple ids to filter (e.g. `--tasks apple_on_plate knife_in_box`).
+Defaults to all five if omitted. Operator grades success after each trial.
+
+| task_id | instruction | paper | scene setup |
+|---|---|---:|---|
+| `apple_on_plate` | "Put the apple on the plate." | 100.0% | Real apple + empty plate within reach. Use OOD objects. |
+| `pipette_in_tray` | "Put the pipette in the tray." | 86.7% | Pipette on table, tray on the side. OOD pipette color/shape preferred. |
+| `red_cube_in_tape_roll` | "Put the red cube inside the tape roll." | 93.3% | Red cube ~2–3 cm; roll of tape lying flat. |
+| `knife_in_box` | "Put the knife in the box." | 93.3% | Plastic / safe knife on table, open box within reach. |
+| `objects_in_bowl` | "Put the objects in the bowl." | 62.0% | Multiple small objects scattered; success only when ALL visible target objects are in the bowl. |
+
+Per the Table 6 protocol, the external camera pose is **re-randomized
+between trials**, and the runner prompts you to do so between trials.
+The `instruction` text above is the exact string sent to MolmoAct2 —
+don't paraphrase, it has to match the training distribution.
+
+Canonical Table 6 source: see `benchmarks/benchmark/droid_tasks.py`
+(`TASKS` list) — that's where success rates and instructions live; the
+runner pulls from it and prints the side-by-side at the end.
+
 ## Setup
 
 ### 1. HPC (model server)
@@ -519,6 +542,35 @@ python -m benchmarks.scripts.run_droid_benchmark \
 > kernel**. Check with `uname -r` — must show `…-rt…`. Stock kernels throw
 > `RealtimeException`. If you're on a stock kernel, either reboot into the
 > RT entry or use the REST transport instead.
+
+**Tuning for accuracy + smoothness.** Defaults trade speed for accuracy:
+chunks execute fully open-loop unless they're tagged "fine refinement"
+(default threshold ~11° total joint travel), and per-row time is 100 ms.
+On the lab rig that produces noticeable overshoot at chunk boundaries and
+abrupt decel where the controller stops between chunks. Recommended FCI
+settings:
+
+```bash
+python -m benchmarks.scripts.run_droid_benchmark \
+    --transport fci --tasks apple_on_plate --trials 1 \
+    --exec-rows 2 --fine-refinement-travel-rad 5.0 \
+    --chunk-step-dt 0.2
+```
+
+What each one does:
+
+| Flag | Default | Recommended | Effect |
+|---|---:|---:|---|
+| `--exec-rows` | `3` | `2` | Number of rows to run before re-perceiving + re-inferring. Lower = more closed-loop, less overshoot. |
+| `--fine-refinement-travel-rad` | `0.2` | `5.0` | Below this much total joint travel (rad), the chunk is treated as fine refinement and `--exec-rows` applies. Default only triggers on tiny refinement chunks; raise it so almost every non-grasp chunk runs receding-horizon. |
+| `--chunk-step-dt` | `0.1` | `0.2` | Commanded duration per action row (sec). Doubling halves average joint velocity, which makes the substep ramp longer and softens chunk-end decel. |
+| `--grasp-commit-grip-frac` | `0.5` | `0.5` | When ≥ this fraction of a chunk's rows command gripper-close, run the whole chunk uninterrupted (don't break a grasp mid-flight). Leave alone. |
+
+Trade-off: ~3–4× more inference calls per trial → a few extra seconds end-to-end,
+which is acceptable for accuracy. If chunk-boundary decel is still too sharp
+after `--chunk-step-dt 0.2`, the deeper knobs (`max_joint_vel_rad_s`,
+`substep_dt_s` inside `panda_driver.send_chunk`) are currently hardcoded —
+exposing them as flags is a small follow-up.
 
 #### 5b. REST (motion_server)
 
