@@ -460,8 +460,16 @@ home manually.
 export FRANKA_BENCH_EXT_INDEX=6            # USB webcam (NOT the RealSense /dev/video* node)
 export FRANKA_BENCH_CAM_W=640              # RealSense D455 has no 256x256 mode
 export FRANKA_BENCH_CAM_H=480
+
+# Required on the lab rig (airscan4): the wrist RealSense sits ~8 cm forward
+# of the TCP, and the external tripod faces the robot (DROID canonical is
+# behind+above, so robot +Y maps to image-left — flip to compensate).
+export FRANKA_BENCH_REST_CAM_DX_M=0.08     # wrist-cam → TCP X offset (REST/MCP)
+export FRANKA_BENCH_FCI_CAM_DX_M=0.08      # same for FCI (terminal-pose only)
+export FRANKA_BENCH_EXT_FLIP_H=1           # mirror external view back to canonical
+
 # optional: FRANKA_BENCH_WRIST_SERIAL=<D457 serial> to pin the wrist cam
-# optional: FRANKA_BENCH_EXT_FLIP_H=1 if the external tripod faces the robot
+# optional: FRANKA_BENCH_EXT_FLIP_V=1 / FRANKA_BENCH_EXT_ROT_DEG ∈ {0,90,180,270}
 ```
 
 Confirm the external index with `v4l2-ctl --list-devices` and pick the one
