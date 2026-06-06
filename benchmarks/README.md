@@ -255,9 +255,14 @@ The motion_rest jump from FCI to REST/MCP is where the transport overhead lives.
 For ad-hoc driving — type an instruction, see what the model does, watch the
 streams — there's a Flask dashboard that replaces the CLI prompts:
 
-- Two live MJPEG tiles: external webcam, wrist RealSense RGB. (The
-  model is RGB-only; depth was removed since it was display-only and
-  unused by inference.)
+- Two live video tiles: external webcam, wrist RealSense RGB. Defaults
+  to **WebRTC** (smoother, lower latency) when `aiortc` + `av` are
+  installed, with automatic fallback to **MJPEG** otherwise. Pass
+  `--no-webrtc` to force MJPEG, or `pip install aiortc av` on the
+  workstation to enable WebRTC. (The model is RGB-only; depth was
+  removed since it was display-only and unused by inference.) Per-tile
+  caption shows `[webrtc]` or `[mjpeg]` so you can see which transport
+  the browser actually negotiated.
 - **Home** button → calls `driver.home()` on whichever transport is active.
 - **Instruction input + Run** button → one inference→exec cycle per click
   (capture → MolmoAct2 → execute the returned chunk). Click again to keep

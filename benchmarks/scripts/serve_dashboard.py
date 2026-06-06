@@ -6,11 +6,15 @@ Auto-detects the robot transport (fci / rest / mcp) from env vars; a UI
 dropdown lets you switch without restarting.
 
 Run on the workstation that has the cameras:
-    pip install flask
+    pip install flask aiortc av    # aiortc/av only needed for WebRTC streaming
     export FRANKA_BENCH_EXT_INDEX=0
     export FRANKA_MCP_URL=...   # or FRANKA_REST_HOST / FRANKA_HOST
     python -m benchmarks.scripts.serve_dashboard --port 8080
 Then open http://<workstation-ip>:8080/.
+
+Video streaming defaults to WebRTC (smoother / lower latency than MJPEG).
+Falls back to MJPEG automatically when aiortc/av aren't installed, or pass
+--no-webrtc to force MJPEG.
 
 Cannot run alongside `run_droid_benchmark.py` -- both want the cameras.
 """
@@ -30,6 +34,17 @@ from benchmarks.benchmark.molmoact_droid_client import DroidClient
 from benchmarks.benchmark.transport import autodetect_transport, make_driver
 
 log = logging.getLogger("dashboard")
+
+
+def _build_webrtc_broadcaster():
+    """Returns a WebRTCBroadcaster, or None if aiortc/av aren't installed.
+    Dashboard then silently falls back to MJPEG."""
+    try:
+        from benchmarks.benchmark.webrtc_broadcaster import WebRTCBroadcaster
+        return WebRTCBroadcaster()
+    except Exception as e:
+        log.warning("WebRTC disabled (falling back to MJPEG): %s", e)
+        return None
 
 
 class _ActionLock:
@@ -170,7 +185,7 @@ _INDEX_HTML = """<!doctype html>
   .grid { display:grid; grid-template-columns: repeat(2, minmax(300px, 1fr)); gap:1rem; }
   .tile { background:#1c1c1c; border:1px solid #2a2a2a; border-radius:8px; padding:0.6rem; }
   .tile h2 { font-size:0.85rem; margin:0 0 0.4rem; color:#9ad; font-weight:600; }
-  .tile img { width:100%; height:auto; background:#000; border-radius:4px; display:block; }
+  .tile img, .tile video { width:100%; height:auto; background:#000; border-radius:4px; display:block; }
   .controls { margin-top:1.2rem; background:#1c1c1c; border:1px solid #2a2a2a; border-radius:8px;
               padding:1rem; display:grid; gap:0.8rem; }
   .row { display:flex; gap:0.6rem; align-items:center; flex-wrap:wrap; }
@@ -194,8 +209,14 @@ _INDEX_HTML = """<!doctype html>
 <h1>MolmoAct2-DROID dashboard</h1>
 
 <div class="grid">
-  <div class="tile"><h2>external (tripod)</h2><img src="/stream/ext"></div>
-  <div class="tile"><h2>wrist RGB (D457)</h2><img src="/stream/wrist_rgb"></div>
+  <div class="tile">
+    <h2>external (tripod) <span id="tag-ext" style="color:#777">[?]</span></h2>
+    <div id="cam-ext"></div>
+  </div>
+  <div class="tile">
+    <h2>wrist RGB (D457) <span id="tag-wrist" style="color:#777">[?]</span></h2>
+    <div id="cam-wrist"></div>
+  </div>
 </div>
 
 <div class="controls">
@@ -219,6 +240,56 @@ _INDEX_HTML = """<!doctype html>
 <script>
 const $ = s => document.querySelector(s);
 const status = $("#status");
+const WEBRTC_ENABLED = __WEBRTC_ENABLED__;
+
+function mountMjpeg(slotId, tagId, src) {
+  const el = document.getElementById(slotId);
+  el.innerHTML = `<img src="${src}">`;
+  const tag = document.getElementById(tagId);
+  if (tag) { tag.textContent = "[mjpeg]"; tag.style.color = "#777"; }
+}
+
+async function mountWebRTC(slotId, tagId, cam) {
+  const el = document.getElementById(slotId);
+  el.innerHTML = '<video autoplay playsinline muted></video>';
+  const video = el.querySelector("video");
+  const pc = new RTCPeerConnection();
+  pc.addTransceiver("video", { direction: "recvonly" });
+  pc.ontrack = (ev) => {
+    if (ev.track.kind === "video") {
+      video.srcObject = ev.streams[0];
+    }
+  };
+  const offer = await pc.createOffer();
+  await pc.setLocalDescription(offer);
+  const r = await fetch(`/offer/${cam}`, {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({sdp: pc.localDescription.sdp, type: pc.localDescription.type}),
+  });
+  if (!r.ok) throw new Error(`offer ${r.status}`);
+  const ans = await r.json();
+  await pc.setRemoteDescription(ans);
+  const tag = document.getElementById(tagId);
+  if (tag) { tag.textContent = "[webrtc]"; tag.style.color = "#7ad07a"; }
+}
+
+(async () => {
+  const mjpegSrc = { ext: "/stream/ext", wrist: "/stream/wrist_rgb" };
+  const slot = { ext: ["cam-ext", "tag-ext"], wrist: ["cam-wrist", "tag-wrist"] };
+  for (const cam of ["ext", "wrist"]) {
+    const [slotId, tagId] = slot[cam];
+    if (WEBRTC_ENABLED) {
+      try {
+        await mountWebRTC(slotId, tagId, cam);
+        continue;
+      } catch (e) {
+        console.warn(`webrtc ${cam} failed, falling back to mjpeg:`, e);
+      }
+    }
+    mountMjpeg(slotId, tagId, mjpegSrc[cam]);
+  }
+})();
 
 async function refreshStatus() {
   try {
@@ -281,9 +352,11 @@ refreshStatus();
 
 # ---------- Flask app ----------
 
-def make_app(state: DashboardState, fps: float = 10.0) -> Flask:
+def make_app(state: DashboardState, fps: float = 10.0,
+             webrtc=None) -> Flask:
     app = Flask(__name__)
     period = 1.0 / max(fps, 1.0)
+    app.config["WEBRTC_ENABLED"] = webrtc is not None
 
     def _stream(getter):
         def gen():
@@ -296,7 +369,8 @@ def make_app(state: DashboardState, fps: float = 10.0) -> Flask:
 
     @app.route("/")
     def index():
-        return _INDEX_HTML
+        flag = "true" if app.config["WEBRTC_ENABLED"] else "false"
+        return _INDEX_HTML.replace("__WEBRTC_ENABLED__", flag)
 
     @app.route("/stream/ext")
     def stream_ext():
@@ -305,6 +379,25 @@ def make_app(state: DashboardState, fps: float = 10.0) -> Flask:
     @app.route("/stream/wrist_rgb")
     def stream_wrist_rgb():
         return _stream(lambda: state.camera.latest_jpegs()[1])
+
+    @app.route("/offer/<cam>", methods=["POST"])
+    def offer(cam: str):
+        if webrtc is None:
+            return jsonify({"ok": False, "error": "webrtc disabled on server"}), 503
+        if cam not in ("ext", "wrist"):
+            return jsonify({"ok": False, "error": f"unknown cam {cam!r}"}), 400
+        body = request.get_json(silent=True) or {}
+        sdp = body.get("sdp"); type_ = body.get("type")
+        if not sdp or not type_:
+            return jsonify({"ok": False, "error": "sdp and type required"}), 400
+        idx = 0 if cam == "ext" else 1
+        getter = lambda: state.camera.latest_rgb_pair()[idx]
+        try:
+            ans = webrtc.handle_offer(sdp, type_, getter)
+        except Exception as e:
+            log.exception("WebRTC offer failed")
+            return jsonify({"ok": False, "error": f"offer failed: {e}"}), 500
+        return jsonify(ans)
 
     @app.route("/api/status")
     def api_status():
@@ -373,6 +466,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--grasp-commit-grip-frac", type=float, default=0.5)
     ap.add_argument("--fine-refinement-travel-rad", type=float, default=0.2)
     ap.add_argument("--mjpeg-fps", type=float, default=10.0)
+    ap.add_argument("--no-webrtc", action="store_true",
+                    help="disable WebRTC streaming and force MJPEG even if "
+                         "aiortc is installed (useful when troubleshooting).")
     args = ap.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO,
@@ -390,10 +486,20 @@ def main(argv: list[str] | None = None) -> int:
         fine_refinement_travel_rad=args.fine_refinement_travel_rad,
     )
 
-    app = make_app(state, fps=args.mjpeg_fps)
+    webrtc = None if args.no_webrtc else _build_webrtc_broadcaster()
+    if webrtc is not None:
+        log.info("WebRTC enabled (pip install aiortc av if you want to disable, "
+                 "or use --no-webrtc)")
+    else:
+        log.info("WebRTC disabled; using MJPEG")
+
+    app = make_app(state, fps=args.mjpeg_fps, webrtc=webrtc)
     try:
         app.run(host=args.host, port=args.port, threaded=True, use_reloader=False)
     finally:
+        if webrtc is not None:
+            try: webrtc.close()
+            except Exception: pass
         state.close()
     return 0
 
