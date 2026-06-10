@@ -1,8 +1,9 @@
-"""Two-camera capture: wrist RealSense + external USB webcam.
+"""Two-camera capture: wrist RealSense + one or two external USB webcams.
 
-MolmoAct2-DROID expects (external_cam, wrist_cam). Your rig only has a wrist
-D457, so this module also supports running with the wrist image duplicated as
-external (DUPLICATE mode), at the cost of expected accuracy.
+MolmoAct2-DROID expects (external_cam, wrist_cam).  When two external webcams
+are configured they are stacked side-by-side into a single wide image, matching
+the DROID training convention.  Fallback: if no external cam is configured the
+wrist image is duplicated (DUPLICATE mode, degraded accuracy).
 """
 from __future__ import annotations
 
@@ -100,6 +101,7 @@ class DualCamera:
         self,
         wrist_serial: Optional[str] = None,
         external_webcam_index: Optional[int] = None,
+        external_webcam_index2: Optional[int] = None,
         external_static_image: Optional[str] = None,
         # D45x has no 256x256 color mode; default to a supported tuple.
         width: int = 640,
@@ -108,25 +110,35 @@ class DualCamera:
         external_rotation_deg: int = 0,
         external_flip_h: bool = False,
         external_flip_v: bool = False,
+        external2_rotation_deg: int = 0,
+        external2_flip_h: bool = False,
+        external2_flip_v: bool = False,
         wrist_rotation_deg: int = 0,
         wrist_flip_h: bool = False,
         wrist_flip_v: bool = False,
     ):
-        if external_rotation_deg not in _VALID_ROT:
-            raise ValueError(f"external_rotation_deg must be one of {_VALID_ROT}")
-        if wrist_rotation_deg not in _VALID_ROT:
-            raise ValueError(f"wrist_rotation_deg must be one of {_VALID_ROT}")
+        for name, val in (("external_rotation_deg", external_rotation_deg),
+                          ("external2_rotation_deg", external2_rotation_deg),
+                          ("wrist_rotation_deg", wrist_rotation_deg)):
+            if val not in _VALID_ROT:
+                raise ValueError(f"{name} must be one of {_VALID_ROT}")
         self._ext_rot = external_rotation_deg
         self._ext_flip_h = bool(external_flip_h)
         self._ext_flip_v = bool(external_flip_v)
+        self._ext2_rot = external2_rotation_deg
+        self._ext2_flip_h = bool(external2_flip_h)
+        self._ext2_flip_v = bool(external2_flip_v)
         self._wrist_rot = wrist_rotation_deg
         self._wrist_flip_h = bool(wrist_flip_h)
         self._wrist_flip_v = bool(wrist_flip_v)
         self._wrist = _RealsenseWrist(wrist_serial, width, height, fps)
         self._external = None
+        self._external2 = None
         self._static_ext = None
         if external_webcam_index is not None:
             self._external = _Webcam(external_webcam_index, width, height)
+            if external_webcam_index2 is not None:
+                self._external2 = _Webcam(external_webcam_index2, width, height)
         elif external_static_image is not None:
             from PIL import Image
             self._static_ext = np.asarray(
@@ -139,14 +151,21 @@ class DualCamera:
         wrist = self._wrist.grab()
         if self._external is not None:
             ext = self._external.grab()
+            if self._ext_rot:
+                ext = _rotate(ext, self._ext_rot)
+            if self._ext_flip_h or self._ext_flip_v:
+                ext = _apply_flips(ext, self._ext_flip_h, self._ext_flip_v)
+            if self._external2 is not None:
+                ext2 = self._external2.grab()
+                if self._ext2_rot:
+                    ext2 = _rotate(ext2, self._ext2_rot)
+                if self._ext2_flip_h or self._ext2_flip_v:
+                    ext2 = _apply_flips(ext2, self._ext2_flip_h, self._ext2_flip_v)
+                ext = np.concatenate([ext, ext2], axis=1)
         elif self._static_ext is not None:
             ext = self._static_ext
         else:
             ext = wrist.copy()         # DUPLICATE mode
-        if self._ext_rot:
-            ext = _rotate(ext, self._ext_rot)
-        if self._ext_flip_h or self._ext_flip_v:
-            ext = _apply_flips(ext, self._ext_flip_h, self._ext_flip_v)
         if self._wrist_rot:
             wrist = _rotate(wrist, self._wrist_rot)
         if self._wrist_flip_h or self._wrist_flip_v:
@@ -157,6 +176,12 @@ class DualCamera:
         self._wrist.close()
         if self._external is not None:
             self._external.close()
+        if self._external2 is not None:
+            self._external2.close()
+
+
+def _bool_env(key: str) -> bool:
+    return os.environ.get(key, "0") not in ("0", "", "false", "False")
 
 
 def from_env() -> DualCamera:
@@ -167,6 +192,10 @@ def from_env() -> DualCamera:
             int(os.environ["FRANKA_BENCH_EXT_INDEX"])
             if "FRANKA_BENCH_EXT_INDEX" in os.environ else None
         ),
+        external_webcam_index2=(
+            int(os.environ["FRANKA_BENCH_EXT_INDEX2"])
+            if "FRANKA_BENCH_EXT_INDEX2" in os.environ else None
+        ),
         external_static_image=os.environ.get("FRANKA_BENCH_EXT_STATIC") or None,
         # D457/D455 have no 256x256 color mode; use a D45x-supported default
         # so a fresh shell without FRANKA_BENCH_CAM_W/_H set doesn't error out
@@ -176,9 +205,12 @@ def from_env() -> DualCamera:
         height=int(os.environ.get("FRANKA_BENCH_CAM_H", "480")),
         fps=int(os.environ.get("FRANKA_BENCH_CAM_FPS", "30")),
         external_rotation_deg=int(os.environ.get("FRANKA_BENCH_EXT_ROT_DEG", "0")),
-        external_flip_h=os.environ.get("FRANKA_BENCH_EXT_FLIP_H", "0") not in ("0", "", "false", "False"),
-        external_flip_v=os.environ.get("FRANKA_BENCH_EXT_FLIP_V", "0") not in ("0", "", "false", "False"),
+        external_flip_h=_bool_env("FRANKA_BENCH_EXT_FLIP_H"),
+        external_flip_v=_bool_env("FRANKA_BENCH_EXT_FLIP_V"),
+        external2_rotation_deg=int(os.environ.get("FRANKA_BENCH_EXT2_ROT_DEG", "0")),
+        external2_flip_h=_bool_env("FRANKA_BENCH_EXT2_FLIP_H"),
+        external2_flip_v=_bool_env("FRANKA_BENCH_EXT2_FLIP_V"),
         wrist_rotation_deg=int(os.environ.get("FRANKA_BENCH_WRIST_ROT_DEG", "0")),
-        wrist_flip_h=os.environ.get("FRANKA_BENCH_WRIST_FLIP_H", "0") not in ("0", "", "false", "False"),
-        wrist_flip_v=os.environ.get("FRANKA_BENCH_WRIST_FLIP_V", "0") not in ("0", "", "false", "False"),
+        wrist_flip_h=_bool_env("FRANKA_BENCH_WRIST_FLIP_H"),
+        wrist_flip_v=_bool_env("FRANKA_BENCH_WRIST_FLIP_V"),
     )
