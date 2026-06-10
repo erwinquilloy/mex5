@@ -9,19 +9,23 @@ End-to-end harness for evaluating **MolmoAct2** on a Franka Research robot:
 ## Topology (DROID path)
 
 ```
-RealSense D457 (wrist) ──┐
-USB webcam (external) ───┴► workstation ──► ssh -L 8000 ──► HPC A100
-                              │                                 │
-                              │                  uv run host_server_droid.py
-                              │                                 │
-                              ▼                                 │
-                  one of three transports ──► Franka  ◄─────────┘  (actions[N,8])
-                  ┌────────────────────────────────────────────────┐
-                  │ fci  : panda_py.JointPosition (direct libfranka) │
-                  │ rest : motion_server (cartesian xyz+ZYX deltas)  │
-                  │ mcp  : fastmcp ──► motion_server (same as rest)  │
-                  └────────────────────────────────────────────────┘
+RealSense D457 (wrist)    ──┐
+USB webcam left  (ext 1)  ──┤
+USB webcam right (ext 2)  ──┴► workstation ──► ssh -L 8000 ──► HPC A100
+                               │                                  │
+                               │                   uv run host_server_droid.py
+                               │                                  │
+                               ▼                                  │
+                   one of three transports ──► Franka  ◄──────────┘  (actions[N,8])
+                   ┌────────────────────────────────────────────────┐
+                   │ fci  : panda_py.JointPosition (direct libfranka) │
+                   │ rest : motion_server (cartesian xyz+ZYX deltas)  │
+                   │ mcp  : fastmcp ──► motion_server (same as rest)  │
+                   └────────────────────────────────────────────────┘
 ```
+
+Ext 1 and ext 2 are stacked side-by-side into a single `(H, 2W, 3)` image before
+being sent to the model (matches the DROID training convention for multi-camera rigs).
 
 Action contract (from the model card): `actions[N, 8]` = `[q1..q7, gripper]`,
 **absolute joint targets in radians + gripper command**. Gripper ≥ 0.5 ⇒ close.
@@ -67,10 +71,12 @@ Then set `FRANKA_MCP_URL=http://<that host>:8085/franka` (or pass `--mcp-url`).
 
 ## Reproducibility caveats vs. Table 6
 
-- **Single external camera**: Table 6's protocol randomizes the external camera pose
-  each trial. We use whatever you mount as `FRANKA_BENCH_EXT_INDEX`. If no
-  external is set, `dual_camera.py` falls back to duplicating the wrist image
-  (substantially OOD for the model — expect a large gap from the paper numbers).
+- **Dual external cameras**: Table 6's protocol randomizes the external camera pose
+  each trial. We mount two USB webcams at the back of the robot arm, both facing
+  45° inward toward the work area (`FRANKA_BENCH_EXT_INDEX` + `FRANKA_BENCH_EXT_INDEX2`);
+  they are stacked side-by-side before inference. If no external cam is set,
+  `dual_camera.py` falls back to duplicating the wrist image (substantially OOD
+  for the model — expect a large gap from the paper numbers).
 - **OOD objects**: bring objects that the model has not seen in DROID training.
   Common household items work; avoid anything that looks like the demo videos.
 - **Controller**: paper uses the DROID NUC + polymetis stack; we use `panda_py`
@@ -120,10 +126,11 @@ curl http://localhost:8000/act    # confirm: {"status": "ok", "repo_id": "...", 
 
 Workspace prep:
 - Wrist D457 mounted, USB-C / FAKRA switch set per `franka/README.md`.
-- External USB webcam plugged in. The RealSense also registers as
+- Both external USB webcams plugged in. The RealSense also registers as
   `/dev/video*`, so a bare `ls /dev/video*` is misleading. Use
-  `v4l2-ctl --list-devices` and pick the index that's *not* under
-  "Intel RealSense" (on `airscan4` this is currently index `6`).
+  `v4l2-ctl --list-devices` and pick the two indices that are *not* under
+  "Intel RealSense" (on `airscan4` these are currently indices `0` and `2`,
+  left cam = lower index).
 - Franka in white/unlocked state, FCI activated (see `franka/python/basic.py`).
 
 ### 3. Run
@@ -302,15 +309,18 @@ Common env vars (cameras):
 
 ```bash
 cd ~/mex5
-export FRANKA_BENCH_EXT_INDEX=0
+# Two external webcams at the back of the arm, 45° inward — stacked side-by-side.
+export FRANKA_BENCH_EXT_INDEX=0            # left cam
+export FRANKA_BENCH_EXT_INDEX2=2           # right cam
+# No horizontal flip needed: symmetric inward-facing setup.
+# Per-camera orientation overrides (all default to no-op):
+# export FRANKA_BENCH_EXT_ROT_DEG=0        # 0 / 90 / 180 / 270
+# export FRANKA_BENCH_EXT_FLIP_H=0
+# export FRANKA_BENCH_EXT_FLIP_V=0
+# export FRANKA_BENCH_EXT2_ROT_DEG=0
+# export FRANKA_BENCH_EXT2_FLIP_H=0
+# export FRANKA_BENCH_EXT2_FLIP_V=0
 # optional: export FRANKA_BENCH_WRIST_SERIAL=<D457 serial>
-
-# External-cam orientation. Canonical DROID is camera behind+above the robot;
-# if your tripod is in front looking back at the robot, robot +Y appears as
-# image-left, which the model reads as the opposite axis. Mirror it back:
-# export FRANKA_BENCH_EXT_FLIP_H=1
-# (X/forward-back is still OOD vs canonical -- no 2D transform fixes that.)
-# Also available: FRANKA_BENCH_EXT_FLIP_V, FRANKA_BENCH_EXT_ROT_DEG ∈ {0,90,180,270}.
 ```
 
 Then pick one of the three launches.
@@ -325,7 +335,7 @@ python -m benchmarks.scripts.serve_dashboard \
 
 One-liner:
 ```bash
-FRANKA_BENCH_EXT_INDEX=0 FRANKA_HOST=192.168.2.100 python -m benchmarks.scripts.serve_dashboard --port 8080 --molmoact-url http://localhost:8000
+FRANKA_BENCH_EXT_INDEX=0 FRANKA_BENCH_EXT_INDEX2=2 FRANKA_HOST=192.168.2.100 python -m benchmarks.scripts.serve_dashboard --port 8080 --molmoact-url http://localhost:8000
 ```
 
 #### Launch (REST)
@@ -343,7 +353,7 @@ python -m benchmarks.scripts.serve_dashboard \
 
 One-liner:
 ```bash
-FRANKA_BENCH_EXT_INDEX=0 FRANKA_REST_HOST=192.168.2.1 python -m benchmarks.scripts.serve_dashboard --port 8080 --molmoact-url http://localhost:8000 --rest-step-time-s 2.5
+FRANKA_BENCH_EXT_INDEX=0 FRANKA_BENCH_EXT_INDEX2=2 FRANKA_REST_HOST=192.168.2.1 python -m benchmarks.scripts.serve_dashboard --port 8080 --molmoact-url http://localhost:8000 --rest-step-time-s 2.5
 ```
 
 > **Note:** MCP is no longer supported on the dashboard. Use FCI or
@@ -520,17 +530,27 @@ home manually.
 ### 4. Camera env vars (all transports)
 
 ```bash
-export FRANKA_BENCH_EXT_INDEX=0            # USB webcam (NOT the RealSense /dev/video* node)
+# Two external webcams (both at the back of the arm, 45° inward).
+# Stacked left→right into a single (H, 2W, 3) image before inference.
+export FRANKA_BENCH_EXT_INDEX=0            # left external cam (NOT the RealSense node)
+export FRANKA_BENCH_EXT_INDEX2=2           # right external cam (NOT the RealSense node)
 export FRANKA_BENCH_CAM_W=640              # RealSense D455 has no 256x256 mode
 export FRANKA_BENCH_CAM_H=480
+# No horizontal flip needed: both cams face inward symmetrically.
+# Per-camera orientation overrides (all default to no-op):
+# export FRANKA_BENCH_EXT_ROT_DEG=0        # 0 / 90 / 180 / 270
+# export FRANKA_BENCH_EXT_FLIP_H=0
+# export FRANKA_BENCH_EXT_FLIP_V=0
+# export FRANKA_BENCH_EXT2_ROT_DEG=0
+# export FRANKA_BENCH_EXT2_FLIP_H=0
+# export FRANKA_BENCH_EXT2_FLIP_V=0
 
 # Required on the lab rig (airscan4): the wrist RealSense is currently mounted
 # UNDER the gripper (closer to the robot base than the original on-top mount),
 # so the cam → TCP forward offset is very small (DX ≈ +0.005 m, not the old
 # 0.08). DZ has not been remeasured for this mount yet — leave it commented
 # out until you've calibrated it (a single apple_on_plate trial with DZ unset
-# tells you whether the model is stopping above the object or colliding into
-# it). External tripod faces the robot, so flip the H axis back to canonical.
+# tells you whether the model is stopping above the object or colliding into it).
 # These DX/DZ values fire on the grasp chunk's terminal row only (the
 # default OFFSET_MODE=grasp_terminal). The 'always' mode is documented
 # below as an opt-in for whole-trajectory perception bias; not recommended
@@ -540,7 +560,6 @@ export FRANKA_BENCH_REST_CAM_DX_M=0.005    # wrist-cam → TCP X offset (REST/MC
 # export FRANKA_BENCH_REST_CAM_DZ_M=...    # unset until remeasured for new mount
 export FRANKA_BENCH_FCI_CAM_DX_M=0.005     # same for FCI (terminal-pose only)
 # export FRANKA_BENCH_FCI_CAM_DZ_M=...     # unset until remeasured for new mount
-export FRANKA_BENCH_EXT_FLIP_H=1           # mirror external view back to canonical
 
 # Wrist-cam reorientation (added after the under-gripper relocation, since the
 # camera body sits in a different orientation than the DROID-canonical mount).
@@ -552,7 +571,6 @@ export FRANKA_BENCH_EXT_FLIP_H=1           # mirror external view back to canoni
 # export FRANKA_BENCH_WRIST_FLIP_V=0
 
 # optional: FRANKA_BENCH_WRIST_SERIAL=<D457 serial> to pin the wrist cam
-# optional: FRANKA_BENCH_EXT_FLIP_V=1 / FRANKA_BENCH_EXT_ROT_DEG ∈ {0,90,180,270}
 # optional: FRANKA_BENCH_LOCK_GRIPPER_DOWN=1
 #   FCI only — IK-solve each row with the TCP Z-axis pinned to vertical so
 #   the gripper can't tilt mid-trajectory. Helps top-down grasps (apple,
@@ -572,8 +590,9 @@ export FRANKA_BENCH_EXT_FLIP_H=1           # mirror external view back to canoni
 #   descent". Tune by watching where the gripper transitions.
 ```
 
-Confirm the external index with `v4l2-ctl --list-devices` and pick the one
-**not** under "Intel RealSense".
+Confirm the external indices with `v4l2-ctl --list-devices` and pick the two
+**not** under "Intel RealSense" — assign the lower index to `EXT_INDEX` (left cam)
+and the higher to `EXT_INDEX2` (right cam).
 
 #### Cam-offset gating modes (advanced)
 
@@ -946,7 +965,7 @@ benchmarks/
   requirements.txt                     workstation deps
   hpc/README.md                        HPC server setup (upstream host_server_droid.py)
   benchmark/
-    dual_camera.py                     wrist (RealSense color) + external (UVC) capture
+    dual_camera.py                     wrist (RealSense color) + one or two external (UVC) cams; dual cams stacked side-by-side
     dashboard_camera.py                wrist RealSense (color) + webcam, background-threaded
     panda_driver.py                    --transport=fci : panda_py joint-position streaming
     franka_rest_driver.py              --transport=rest: FK + motion_server REST
