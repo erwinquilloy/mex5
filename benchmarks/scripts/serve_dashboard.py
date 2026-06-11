@@ -39,6 +39,7 @@ from flask import Flask, Response, jsonify, request
 from benchmarks.benchmark.dashboard_camera import DashboardCamera, from_env as camera_from_env
 from benchmarks.benchmark.driver_errors import CollisionAborted
 from benchmarks.benchmark import droid_tasks
+from benchmarks.benchmark.droid_runner import _enforce_hold_until_target
 from benchmarks.benchmark.molmoact_droid_client import DroidClient
 from benchmarks.benchmark.transport import make_driver
 
@@ -234,17 +235,32 @@ class DashboardState:
             self.driver.home()
         return {"ok": True, "info": "homed via rest"}
 
-    def do_task(self, instruction: str, max_chunks: Optional[int] = None) -> dict:
+    def do_task(self, instruction: str, max_chunks: Optional[int] = None,
+                task_id: Optional[str] = None) -> dict:
         """Run a full trial loop: capture → infer → exec, repeated up to
-        max_chunks (or self.max_chunks if None) or until /api/stop is hit."""
+        max_chunks (or self.max_chunks if None) or until /api/stop is hit.
+
+        When ``task_id`` resolves to a DroidTask that has ``target_zone_xy``
+        defined, the policy's gripper-open commands are suppressed for any
+        row whose commanded TCP XY lies outside that box while an object
+        is detected in the jaws -- mirrors the CLI runner's
+        --hold-until-target behavior so the arm can't drop the object
+        mid-transport just because MolmoAct2 emitted a premature release."""
         self._stop_event.clear()
         cap = int(max_chunks) if max_chunks is not None else self.max_chunks
+        target_zone = None
+        if task_id:
+            try:
+                target_zone = droid_tasks.by_id(task_id).target_zone_xy
+            except KeyError:
+                target_zone = None
         t0 = time.perf_counter()
         chunks_done = 0
         last_pred_rows = 0
         last_exec_rows = 0
         total_server_ms = 0.0
         total_rtt_ms = 0.0
+        total_suppressed = 0
         stopped_by = "max_chunks"
         for chunk_i in range(cap):
             if self._stop_event.is_set():
@@ -266,6 +282,20 @@ class DashboardState:
                 num_steps=10,
             )
             rows = self._select_rows(pred.actions)
+            if target_zone is not None:
+                # Copy so we don't mutate pred.actions (kept verbatim for any
+                # later inspection / logging).
+                rows = np.asarray(rows, dtype=np.float64).copy()
+                n_supp = _enforce_hold_until_target(
+                    rows, float(state8[7]), target_zone,
+                )
+                if n_supp > 0:
+                    total_suppressed += n_supp
+                    log.warning(
+                        "hold-until-target: kept gripper closed on %d/%d row(s) "
+                        "(%s chunk %d) — policy tried to release outside target zone",
+                        n_supp, len(rows), task_id, chunk_i + 1,
+                    )
             try:
                 with self._driver_lock:
                     self.driver.send_chunk(
@@ -310,6 +340,8 @@ class DashboardState:
             "infer_rtt_ms_total": round(total_rtt_ms, 1),
             "last_rows_received": last_pred_rows,
             "last_rows_executed": last_exec_rows,
+            "hold_until_target": target_zone is not None,
+            "gripper_open_suppressed": total_suppressed,
         }
 
     def _select_rows(self, actions: np.ndarray) -> np.ndarray:
@@ -821,6 +853,8 @@ def make_app(state: DashboardState, fps: float = 30.0, webrtc=None) -> Flask:
                 "paper_success_rate": t.paper_success_rate,
                 "max_chunks": t.max_chunks,
                 "trials": t.trials,
+                "target_zone_xy": t.target_zone_xy,
+                "hold_until_target": t.target_zone_xy is not None,
             })
         return jsonify({"tasks": out})
 
@@ -892,7 +926,7 @@ def make_app(state: DashboardState, fps: float = 30.0, webrtc=None) -> Flask:
             return jsonify({"ok": False, "error": "another action is in progress"}), 409
         try:
             try:
-                result = state.do_task(instruction, max_chunks=max_chunks)
+                result = state.do_task(instruction, max_chunks=max_chunks, task_id=task_id)
                 result["instruction"] = instruction
                 if task_id:
                     result["task_id"] = task_id
