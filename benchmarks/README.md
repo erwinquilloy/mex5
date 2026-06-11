@@ -129,8 +129,8 @@ Workspace prep:
 - Both external USB webcams plugged in. The RealSense also registers as
   `/dev/video*`, so a bare `ls /dev/video*` is misleading. Use
   `v4l2-ctl --list-devices` and pick the two indices that are *not* under
-  "Intel RealSense" (on `airscan4` these are currently indices `0` and `2`,
-  left cam = lower index).
+  "Intel RealSense" (on `airscan4`: index `2` = left cam, index `0` = right cam;
+  both produce horizontally mirrored output and need `FLIP_H=1`).
 - Franka in white/unlocked state, FCI activated (see `franka/python/basic.py`).
 
 ### 3. Run
@@ -138,9 +138,13 @@ Workspace prep:
 Common env vars (cameras + model server):
 
 ```bash
-export FRANKA_BENCH_EXT_INDEX=0          # USB webcam (NOT the RealSense node)
-# RealSense D455 has no 256x256 mode; use a native resolution
-export FRANKA_BENCH_CAM_W=640
+# Two external webcams at the back of the arm, 45° inward — stacked left→right.
+# Both cameras produce a horizontally mirrored image and need FLIP_H=1.
+export FRANKA_BENCH_EXT_INDEX=2          # left physical cam  (airscan4: /dev/video2)
+export FRANKA_BENCH_EXT_FLIP_H=1
+export FRANKA_BENCH_EXT_INDEX2=0         # right physical cam (airscan4: /dev/video0)
+export FRANKA_BENCH_EXT2_FLIP_H=1
+export FRANKA_BENCH_CAM_W=640            # RealSense D455 has no 256x256 mode
 export FRANKA_BENCH_CAM_H=480
 # optional: FRANKA_BENCH_WRIST_SERIAL=<D457 serial>  to pin the wrist cam
 ```
@@ -309,18 +313,14 @@ Common env vars (cameras):
 
 ```bash
 cd ~/mex5
-# Two external webcams at the back of the arm, 45° inward — stacked side-by-side.
-export FRANKA_BENCH_EXT_INDEX=0            # left cam
-export FRANKA_BENCH_EXT_INDEX2=2           # right cam
-# No horizontal flip needed: symmetric inward-facing setup.
-# Per-camera orientation overrides (all default to no-op):
-# export FRANKA_BENCH_EXT_ROT_DEG=0        # 0 / 90 / 180 / 270
-# export FRANKA_BENCH_EXT_FLIP_H=0
-# export FRANKA_BENCH_EXT_FLIP_V=0
-# export FRANKA_BENCH_EXT2_ROT_DEG=0
-# export FRANKA_BENCH_EXT2_FLIP_H=0
-# export FRANKA_BENCH_EXT2_FLIP_V=0
+# Two external webcams at the back of the arm, 45° inward — stacked left→right.
+# Both cameras produce a horizontally mirrored image and need FLIP_H=1.
+export FRANKA_BENCH_EXT_INDEX=2            # left physical cam  (airscan4: /dev/video2)
+export FRANKA_BENCH_EXT_FLIP_H=1
+export FRANKA_BENCH_EXT_INDEX2=0           # right physical cam (airscan4: /dev/video0)
+export FRANKA_BENCH_EXT2_FLIP_H=1
 # optional: export FRANKA_BENCH_WRIST_SERIAL=<D457 serial>
+# Per-camera rotation if needed: FRANKA_BENCH_EXT_ROT_DEG / FRANKA_BENCH_EXT2_ROT_DEG ∈ {0,90,180,270}
 ```
 
 Then pick one of the three launches.
@@ -335,7 +335,7 @@ python -m benchmarks.scripts.serve_dashboard \
 
 One-liner:
 ```bash
-FRANKA_BENCH_EXT_INDEX=0 FRANKA_BENCH_EXT_INDEX2=2 FRANKA_HOST=192.168.2.100 python -m benchmarks.scripts.serve_dashboard --port 8080 --molmoact-url http://localhost:8000
+FRANKA_BENCH_EXT_INDEX=2 FRANKA_BENCH_EXT_FLIP_H=1 FRANKA_BENCH_EXT_INDEX2=0 FRANKA_BENCH_EXT2_FLIP_H=1 FRANKA_HOST=192.168.2.100 python -m benchmarks.scripts.serve_dashboard --port 8080 --molmoact-url http://localhost:8000
 ```
 
 #### Launch (REST)
@@ -353,7 +353,7 @@ python -m benchmarks.scripts.serve_dashboard \
 
 One-liner:
 ```bash
-FRANKA_BENCH_EXT_INDEX=0 FRANKA_BENCH_EXT_INDEX2=2 FRANKA_REST_HOST=192.168.2.1 python -m benchmarks.scripts.serve_dashboard --port 8080 --molmoact-url http://localhost:8000 --rest-step-time-s 2.5
+FRANKA_BENCH_EXT_INDEX=2 FRANKA_BENCH_EXT_FLIP_H=1 FRANKA_BENCH_EXT_INDEX2=0 FRANKA_BENCH_EXT2_FLIP_H=1 FRANKA_REST_HOST=192.168.2.1 python -m benchmarks.scripts.serve_dashboard --port 8080 --molmoact-url http://localhost:8000 --rest-step-time-s 2.5
 ```
 
 > **Note:** MCP is no longer supported on the dashboard. Use FCI or
@@ -532,18 +532,14 @@ home manually.
 ```bash
 # Two external webcams (both at the back of the arm, 45° inward).
 # Stacked left→right into a single (H, 2W, 3) image before inference.
-export FRANKA_BENCH_EXT_INDEX=0            # left external cam (NOT the RealSense node)
-export FRANKA_BENCH_EXT_INDEX2=2           # right external cam (NOT the RealSense node)
+# Both cameras produce a horizontally mirrored image — FLIP_H=1 corrects this.
+export FRANKA_BENCH_EXT_INDEX=2            # left physical cam  (airscan4: /dev/video2)
+export FRANKA_BENCH_EXT_FLIP_H=1
+export FRANKA_BENCH_EXT_INDEX2=0           # right physical cam (airscan4: /dev/video0)
+export FRANKA_BENCH_EXT2_FLIP_H=1
 export FRANKA_BENCH_CAM_W=640              # RealSense D455 has no 256x256 mode
 export FRANKA_BENCH_CAM_H=480
-# No horizontal flip needed: both cams face inward symmetrically.
-# Per-camera orientation overrides (all default to no-op):
-# export FRANKA_BENCH_EXT_ROT_DEG=0        # 0 / 90 / 180 / 270
-# export FRANKA_BENCH_EXT_FLIP_H=0
-# export FRANKA_BENCH_EXT_FLIP_V=0
-# export FRANKA_BENCH_EXT2_ROT_DEG=0
-# export FRANKA_BENCH_EXT2_FLIP_H=0
-# export FRANKA_BENCH_EXT2_FLIP_V=0
+# Per-camera rotation if needed: FRANKA_BENCH_EXT_ROT_DEG / FRANKA_BENCH_EXT2_ROT_DEG ∈ {0,90,180,270}
 
 # Required on the lab rig (airscan4): the wrist RealSense is currently mounted
 # UNDER the gripper (closer to the robot base than the original on-top mount),
@@ -591,8 +587,9 @@ export FRANKA_BENCH_FCI_CAM_DX_M=0.005     # same for FCI (terminal-pose only)
 ```
 
 Confirm the external indices with `v4l2-ctl --list-devices` and pick the two
-**not** under "Intel RealSense" — assign the lower index to `EXT_INDEX` (left cam)
-and the higher to `EXT_INDEX2` (right cam).
+**not** under "Intel RealSense". On `airscan4`: `EXT_INDEX=2` (left physical cam),
+`EXT_INDEX2=0` (right physical cam). Both need `FLIP_H=1` — their drivers produce
+a horizontally mirrored image.
 
 #### Cam-offset gating modes (advanced)
 
