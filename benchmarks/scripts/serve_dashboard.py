@@ -42,6 +42,8 @@ from benchmarks.benchmark import droid_tasks
 from benchmarks.benchmark.droid_runner import (
     _enforce_hold_until_target,
     _enforce_hold_until_transported,
+    _suppress_opens_while_empty,
+    _is_holding,
 )
 from benchmarks.benchmark.molmoact_droid_client import DroidClient
 from benchmarks.benchmark.transport import make_driver
@@ -265,6 +267,10 @@ class DashboardState:
         total_server_ms = 0.0
         total_rtt_ms = 0.0
         total_suppressed = 0
+        total_empty_suppressed = 0
+        grasp_fail_count = 0
+        ever_held = False
+        prev_last_grip_close: Optional[bool] = None
         grasp_xy: Optional[tuple[float, float]] = None
         stopped_by = "max_chunks"
         for chunk_i in range(cap):
@@ -279,6 +285,17 @@ class DashboardState:
                         "chunks_done": chunks_done}
             with self._driver_lock:
                 state8 = self.driver.state_vec8()
+            current_width = float(state8[7])
+            # Grasp-fail detection: previous chunk ended with the policy
+            # commanding close, but the jaws are now fully closed-empty.
+            if prev_last_grip_close is True and current_width < 0.005:
+                grasp_fail_count += 1
+                log.warning(
+                    "grasp_fail: width=%.4f after commanded close (chunk %d, task=%s)",
+                    current_width, chunk_i + 1, task_id or "custom",
+                )
+            if _is_holding(current_width):
+                ever_held = True
             pred = self.client.act(
                 external_cam=ext_rgb,
                 wrist_cam=wrist_rgb,
@@ -317,6 +334,19 @@ class DashboardState:
                         n_supp, len(rows), task_id or "custom", chunk_i + 1,
                         hold_min_dist_m,
                     )
+                # Hold-empty guard: if we've never observed a successful
+                # holding state this trial, suppress any open commands while
+                # the jaws are closed-empty. The release event makes no
+                # sense if we haven't grasped anything yet.
+                if not ever_held:
+                    n_empty = _suppress_opens_while_empty(rows, current_width)
+                    if n_empty > 0:
+                        total_empty_suppressed += n_empty
+                        log.warning(
+                            "hold-empty: kept gripper closed on %d/%d row(s) "
+                            "(%s chunk %d) — no successful grasp observed yet",
+                            n_empty, len(rows), task_id or "custom", chunk_i + 1,
+                        )
             try:
                 with self._driver_lock:
                     self.driver.send_chunk(
@@ -356,6 +386,10 @@ class DashboardState:
             last_exec_rows = int(len(rows))
             total_server_ms += float(pred.server_dt_ms)
             total_rtt_ms += float(pred.rtt_ms)
+            # Track what the driver actually executed, so the next chunk can
+            # tell whether a 'commanded close' produced a real grasp.
+            if len(rows) > 0:
+                prev_last_grip_close = bool(rows[-1, 7] >= 0.5)
         self._set_progress(0, 0)
         # Stop overrides the task: cancel and return the arm to home.
         homed_after_stop = None
@@ -382,6 +416,9 @@ class DashboardState:
             "hold_until_target": target_zone is not None,
             "hold_min_dist_m": hold_min_dist_m if target_zone is None else None,
             "gripper_open_suppressed": total_suppressed,
+            "gripper_open_suppressed_empty": total_empty_suppressed,
+            "grasp_fail_count": grasp_fail_count,
+            "ever_held": ever_held,
             "homed_after_stop": homed_after_stop,
             "home_error": home_error,
         }

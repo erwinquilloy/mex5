@@ -57,6 +57,35 @@ def _enforce_hold_until_target(
     return suppressed
 
 
+def _suppress_opens_while_empty(
+    actions: np.ndarray,
+    width: float,
+    grip_threshold: float = 0.5,
+) -> int:
+    """Block policy-commanded gripper-opens when the jaws are fully closed
+    on nothing (``width < _HOLDING_WIDTH_MIN_M``).
+
+    Intended for the "hold-empty" guard: if we never successfully grasped
+    an object, an "open" command is just noise -- there's nothing to
+    release. Callers gate this with their own ``ever_held`` tracking so
+    that a legitimate post-release re-grasp attempt isn't suppressed.
+
+    NOTE: enabling this guard blocks the policy's natural retry-after-fail
+    opens (open jaws to re-approach and re-grasp). Pair with a manual
+    Stop+home if you need vision-based retries.
+
+    Mutates ``actions[:, 7]`` in place. Returns count of overridden rows.
+    """
+    if width >= _HOLDING_WIDTH_MIN_M:
+        return 0
+    suppressed = 0
+    for i in range(len(actions)):
+        if actions[i, 7] < grip_threshold:
+            actions[i, 7] = 1.0
+            suppressed += 1
+    return suppressed
+
+
 def _enforce_hold_until_transported(
     actions: np.ndarray,
     state8: np.ndarray,
