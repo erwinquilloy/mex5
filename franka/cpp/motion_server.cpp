@@ -342,12 +342,22 @@ public:
         std::lock_guard<std::mutex> lock(robot_mutex);
         try {
             double grasping_width = numbers[0];
+            // Optional holding force in newtons (numbers[1]); default 60 N.
+            // The force MUST be non-zero or the gripper applies no clamping
+            // torque and the object back-drives the fingers open / slips out
+            // the moment the arm lifts (gravity + acceleration). 60 N matches
+            // grasp_object.cpp and holds typical benchmark objects.
+            double force = (numbers.size() > 1) ? static_cast<double>(numbers[1]) : 60.0;
             franka::GripperState gripper_state = gripper.readOnce();
             if (gripper_state.max_width < grasping_width) {
                 return "Object is too large for the current fingers on the gripper: " + std::to_string(gripper_state.max_width);
             }
-            // gripper.grasp(width, speed, force, epsilon_inner=0.005, epsilon_outer=0.005)
-            if (!gripper.grasp(grasping_width, 0.1, 0.0, 0.01, 0.01)) {
+            // gripper.grasp(width, speed, force, epsilon_inner, epsilon_outer).
+            // We typically command width 0 (close fully) on an object of unknown
+            // size, so epsilon_outer = max_width makes a stop at *any* object
+            // width count as a successful grasp; a tight epsilon_outer would
+            // otherwise report failure for objects wider than ~1 cm.
+            if (!gripper.grasp(grasping_width, 0.1, force, 0.005, gripper_state.max_width)) {
                 return "Failed to grasp object.";
             }
             std::this_thread::sleep_for(std::chrono::duration<double, std::milli>(100));
