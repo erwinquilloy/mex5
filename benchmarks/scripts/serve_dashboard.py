@@ -323,6 +323,7 @@ class DashboardState:
                         rows,
                         step_dt_s=self.rest_step_time_s,
                         lock_gripper_down=self.lock_gripper_down,
+                        stop_check=self._stop_event.is_set,
                     )
             except CollisionAborted as ca:
                 # Libfranka's reflex aborted the move (most commonly: gripper
@@ -344,12 +345,29 @@ class DashboardState:
                     "home_error": home_error,
                     "chunks_done": chunks_done,
                 }
+            # If Stop was clicked during this chunk, send_chunk returned early.
+            # Don't count it as a completed chunk and don't run any further
+            # chunks -- fall through to the post-loop home() below.
+            if self._stop_event.is_set():
+                stopped_by = "stop_requested"
+                break
             chunks_done += 1
             last_pred_rows = int(len(pred.actions))
             last_exec_rows = int(len(rows))
             total_server_ms += float(pred.server_dt_ms)
             total_rtt_ms += float(pred.rtt_ms)
         self._set_progress(0, 0)
+        # Stop overrides the task: cancel and return the arm to home.
+        homed_after_stop = None
+        home_error: Optional[str] = None
+        if stopped_by == "stop_requested":
+            try:
+                with self._driver_lock:
+                    self.driver.home()
+                homed_after_stop = True
+            except Exception as he:
+                homed_after_stop = False
+                home_error = str(he)
         return {
             "ok": True,
             "info": f"trial done via rest ({stopped_by})",
@@ -364,6 +382,8 @@ class DashboardState:
             "hold_until_target": target_zone is not None,
             "hold_min_dist_m": hold_min_dist_m if target_zone is None else None,
             "gripper_open_suppressed": total_suppressed,
+            "homed_after_stop": homed_after_stop,
+            "home_error": home_error,
         }
 
     def _select_rows(self, actions: np.ndarray) -> np.ndarray:

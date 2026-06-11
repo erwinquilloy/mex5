@@ -76,7 +76,7 @@ import math
 import os
 import time
 from dataclasses import dataclass
-from typing import Optional, Sequence
+from typing import Callable, Optional, Sequence
 
 import numpy as np
 import requests
@@ -424,6 +424,7 @@ class FrankaRestDriver:
         # Accepted for PandaDriver-API compatibility; unused on REST path.
         substep_dt_s: float = 0.01,
         max_joint_vel_rad_s: float = 0.5,
+        stop_check: Optional[Callable[[], bool]] = None,
     ) -> None:
         """Stream a (N, 8) action chunk through moveToCartesian + open/closeGripper.
 
@@ -431,6 +432,10 @@ class FrankaRestDriver:
         produce the server's xyz + ZYX-Euler-delta-degrees input, subdividing
         any row whose orientation delta would exceed the server's ±90° per-axis
         clip or the configured angular/linear velocity caps.
+
+        ``stop_check`` is polled between rows; returning True breaks out of
+        the chunk early so the dashboard's Stop button can interrupt within
+        ~one row's motion time rather than waiting for the full chunk.
         """
         actions = np.asarray(actions, dtype=np.float64)
         if actions.ndim != 2 or actions.shape[1] != 8:
@@ -447,6 +452,8 @@ class FrankaRestDriver:
         if two_phase:
             import panda_py
         for i, row in enumerate(actions):
+            if stop_check is not None and stop_check():
+                return
             q_target = row[:7]
             close = bool(row[7] >= grip_threshold)
             t_sec = slow_t_sec
