@@ -406,6 +406,27 @@ class DashboardState:
             setter(dx, dy, dz)
         return {"ok": True, "dx": dx, "dy": dy, "dz": dz}
 
+    def gripper_status(self) -> dict:
+        """Best-effort gripper read for the status panel. Skips the driver
+        call when a higher-level action holds the lock so the status poll
+        doesn't stall waiting for a trial to finish."""
+        if self.action_lock.snapshot()["busy"]:
+            return {"state": "busy", "width_m": None}
+        try:
+            with self._driver_lock:
+                s = self.driver.get_state()
+        except Exception as e:
+            return {"state": "error", "width_m": None, "error": str(e)[:120]}
+        w = float(s.gripper_width)
+        # Thresholds match droid_runner._is_holding / _HOLDING_WIDTH_*.
+        if w >= 0.075:
+            label = "open"
+        elif w > 0.005:
+            label = "holding"
+        else:
+            label = "closed"
+        return {"state": label, "width_m": round(w, 4)}
+
     def set_resolution(self, width: int, height: int, fps: int) -> dict:
         try:
             self.camera.restart_with_resolution(width, height, fps)
@@ -459,6 +480,17 @@ _INDEX_HTML = """<!doctype html>
   #task-instruction { color:#bbb; font-size:0.85rem; min-height:1.2em; font-style:italic; }
   #status { font-size:0.85rem; color:#bbb; white-space:pre-wrap; min-height:1.2em; }
   #ms-status { font-size:0.85rem; color:#bbb; }
+  .grip-pill { display:inline-flex; align-items:center; gap:0.4rem;
+               background:#222; border:1px solid #333; border-radius:999px;
+               padding:0.25rem 0.7rem; font-size:0.85rem; font-weight:600;
+               letter-spacing:0.04em; text-transform:uppercase; }
+  .grip-dot { width:0.7rem; height:0.7rem; border-radius:50%;
+              background:#666; box-shadow:0 0 0.4rem currentColor; }
+  .grip-open    .grip-dot { background:#9ad; color:#9ad; }
+  .grip-holding .grip-dot { background:#7ad07a; color:#7ad07a; }
+  .grip-closed  .grip-dot { background:#e07a7a; color:#e07a7a; }
+  .grip-busy    .grip-dot { background:#e0c47a; color:#e0c47a; }
+  .grip-error   .grip-dot { background:#888; color:#888; }
   .ok { color:#7ad07a; }
   .err { color:#e07a7a; }
   .busy { color:#e0c47a; }
@@ -466,7 +498,13 @@ _INDEX_HTML = """<!doctype html>
 </style>
 </head>
 <body>
-<h1>MolmoAct2-DROID dashboard</h1>
+<h1>
+  MolmoAct2-DROID dashboard
+  <span id="gripper-pill" class="grip-pill grip-error" style="margin-left:1rem;">
+    <span class="grip-dot"></span>
+    <span id="gripper-label">gripper —</span>
+  </span>
+</h1>
 
 <div class="cams">
   <div class="tile">
@@ -662,6 +700,14 @@ async function refreshStatus() {
     if (j.cam_offsets) {
       const o = j.cam_offsets;
       $("#off-current").textContent = `current: DX=${o.dx.toFixed(3)} DY=${o.dy.toFixed(3)} DZ=${o.dz.toFixed(3)}`;
+    }
+    if (j.gripper) {
+      const g = j.gripper;
+      const pill = $("#gripper-pill");
+      pill.classList.remove("grip-open", "grip-holding", "grip-closed", "grip-busy", "grip-error");
+      pill.classList.add(`grip-${g.state}`);
+      const w = (g.width_m === null || g.width_m === undefined) ? "—" : `${(g.width_m*1000).toFixed(1)} mm`;
+      $("#gripper-label").textContent = `gripper ${g.state} (${w})`;
     }
     if (j.motion_server) {
       const ms = j.motion_server;
@@ -876,6 +922,7 @@ def make_app(state: DashboardState, fps: float = 30.0, webrtc=None) -> Flask:
         dx, dy, dz = state.get_cam_offsets()
         snap["cam_offsets"] = {"dx": dx, "dy": dy, "dz": dz}
         snap["motion_server"] = state.motion_server.status()
+        snap["gripper"] = state.gripper_status()
         return jsonify(snap)
 
     @app.route("/api/tasks")
