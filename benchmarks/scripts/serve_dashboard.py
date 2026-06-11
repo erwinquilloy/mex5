@@ -506,22 +506,54 @@ async function mountWebRTC(slotId, tagId, cam) {
     headers: {"Content-Type": "application/json"},
     body: JSON.stringify({sdp: pc.localDescription.sdp, type: pc.localDescription.type}),
   });
-  if (!r.ok) throw new Error(`offer ${r.status}`);
+  if (!r.ok) { pc.close(); throw new Error(`offer ${r.status}`); }
   const ans = await r.json();
   await pc.setRemoteDescription(ans);
+
+  // Media watchdog. Signaling (SDP exchange) can succeed while ICE/media
+  // never actually connects — common when the browser is on a different
+  // host than the server and WebRTC's UDP path can't traverse. Without this
+  // the <video> mounts empty and never falls back, leaving a blank panel.
+  // If no frame arrives shortly, tear down and throw so the caller falls
+  // back to MJPEG, which rides the same HTTP path the page already loaded on.
+  await new Promise((resolve, reject) => {
+    let settled = false;
+    const cleanup = () => {
+      clearTimeout(timer);
+      video.removeEventListener("loadeddata", onData);
+      pc.removeEventListener("connectionstatechange", onState);
+    };
+    const onData = () => { if (!settled) { settled = true; cleanup(); resolve(); } };
+    const onState = () => {
+      if (!settled && ["failed", "disconnected", "closed"].includes(pc.connectionState)) {
+        settled = true; cleanup(); pc.close(); reject(new Error(`pc ${pc.connectionState}`));
+      }
+    };
+    const timer = setTimeout(() => {
+      if (!settled) { settled = true; cleanup(); pc.close(); reject(new Error("no media within 5s")); }
+    }, 5000);
+    video.addEventListener("loadeddata", onData);
+    pc.addEventListener("connectionstatechange", onState);
+    if (video.readyState >= 2) onData();  // already has data
+  });
+
   const tag = document.getElementById(tagId);
   if (tag) { tag.textContent = "[webrtc]"; tag.style.color = "#7ad07a"; }
 }
 
-async function mountCameras() {
-  for (const cam of CAMS) {
-    const [slotId, tagId] = SLOT[cam];
-    if (WEBRTC_ENABLED) {
-      try { await mountWebRTC(slotId, tagId, cam); continue; }
-      catch (e) { console.warn(`webrtc ${cam} failed, falling back to mjpeg:`, e); }
-    }
-    mountMjpeg(slotId, tagId, STREAM_PATH[cam] + `?t=${Date.now()}`);
+async function mountOne(cam) {
+  const [slotId, tagId] = SLOT[cam];
+  if (WEBRTC_ENABLED) {
+    try { await mountWebRTC(slotId, tagId, cam); return; }
+    catch (e) { console.warn(`webrtc ${cam} failed, falling back to mjpeg:`, e); }
   }
+  mountMjpeg(slotId, tagId, STREAM_PATH[cam] + `?t=${Date.now()}`);
+}
+
+async function mountCameras() {
+  // Mount in parallel so one camera's WebRTC watchdog timeout doesn't delay
+  // the others' fallback.
+  await Promise.all(CAMS.map(mountOne));
 }
 
 async function refreshStatus() {
