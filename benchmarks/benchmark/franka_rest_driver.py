@@ -58,17 +58,17 @@ Tunable via env vars (all optional):
                                         bias, not small geometric offsets).
     FRANKA_BENCH_REST_FAST_STEP_TIME_S  per-row motion time used when the
                                         commanded TCP Z is at/above
-                                        FRANKA_BENCH_REST_SLOW_ZONE_Z_M. Free
-                                        space → race through; only the default
-                                        --rest-step-time-s is used near the
-                                        table. Default 2.0 s; two-phase is ON by
-                                        default (set FAST == step_time_s, or
-                                        SLOW_ZONE_Z_M very high, to disable).
-                                        Values ≤ 1.0 s trip a reflex abort on
-                                        the first chunk out of home — don't.
+                                        FRANKA_BENCH_REST_SLOW_ZONE_Z_M.
+                                        Default 2.0 s. Values ≤ 1.0 s trip a
+                                        reflex abort on the first chunk out of
+                                        home — don't.
     FRANKA_BENCH_REST_SLOW_ZONE_Z_M     TCP Z (m, base frame) at and below
-                                        which the slow time applies. Roughly
-                                        "table height + 20 cm". Default 0.20 m.
+                                        which the slow --rest-step-time-s
+                                        applies. Default 0.0 m == no slow zone
+                                        (fast time used for the whole
+                                        trajectory). Raise it (e.g. 0.20 ≈
+                                        "table height + 20 cm") to slow the
+                                        final descent for precise grasps.
 """
 from __future__ import annotations
 
@@ -87,15 +87,17 @@ _HOME_Q = np.array([0., -np.pi/4, 0., -3*np.pi/4, 0., np.pi/2, np.pi/4], dtype=n
 _GRIPPER_MAX_M = 0.08
 _DEFAULT_REST_STEP_TIME_S = 2.5
 _DEFAULT_HOME_TIME_S = 3.0
-# Two-phase approach defaults (ON by default): race through free space at
-# FAST_STEP_TIME, drop back to the slow step_time_s only inside SLOW_ZONE_Z
-# (near the table) where grasp precision matters. 2.0 s is the README's
-# documented safe floor on this rig — shorter (≤ 1.0 s) trips
+# Approach pacing. FAST_STEP_TIME is the per-row motion time; 2.0 s is the
+# README's documented safe floor on this rig — shorter (≤ 1.0 s) trips
 # `cartesian_motion_generator_joint_acceleration_discontinuity` on the first
 # chunk out of home. The bigger approach speedup comes from the raised linear
 # velocity cap (MAX_LIN_M_S), which governs the long distance-limited legs.
+#
+# SLOW_ZONE defaults to 0.0 m == "no slow zone": the fast time is used for the
+# whole trajectory, including the final descent. Raise it (e.g. 0.20) to slow
+# the last leg near the table for more precise grasps.
 _DEFAULT_FAST_STEP_TIME_S = 2.0
-_DEFAULT_SLOW_ZONE_Z_M = 0.20
+_DEFAULT_SLOW_ZONE_Z_M = 0.0
 
 # Server-side hard limits, copied here so we don't post things the server will
 # silently drop.

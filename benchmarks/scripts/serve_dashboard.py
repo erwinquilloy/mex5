@@ -172,6 +172,16 @@ class MotionServerLauncher:
         return self.start()
 
 
+def _subsample_rows(actions: np.ndarray, max_rows: int) -> np.ndarray:
+    """Evenly thin ``actions`` to at most ``max_rows`` rows, always keeping the
+    final waypoint. ``max_rows <= 0`` disables thinning (returns all rows)."""
+    n = len(actions)
+    if max_rows <= 0 or n <= max_rows:
+        return actions
+    idx = np.unique(np.linspace(0, n - 1, max_rows).round().astype(int))
+    return actions[idx]
+
+
 class DashboardState:
     def __init__(
         self,
@@ -180,6 +190,7 @@ class DashboardState:
         exec_rows: int,
         grasp_commit_grip_frac: float,
         fine_refinement_travel_rad: float,
+        approach_max_rows: int = 4,
         max_chunks: int = 30,
         motion_server: Optional[MotionServerLauncher] = None,
     ):
@@ -189,6 +200,7 @@ class DashboardState:
         self.transport = "rest"
         self.rest_step_time_s = float(rest_step_time_s)
         self.exec_rows = int(exec_rows)
+        self.approach_max_rows = int(approach_max_rows)
         self.grasp_commit_grip_frac = float(grasp_commit_grip_frac)
         self.fine_refinement_travel_rad = float(fine_refinement_travel_rad)
         self.max_chunks = int(max_chunks)
@@ -301,7 +313,8 @@ class DashboardState:
         }
 
     def _select_rows(self, actions: np.ndarray) -> np.ndarray:
-        # Same adaptive logic as droid_runner.run_trial.
+        # Adaptive row selection (cf. droid_runner.run_trial), plus an extra
+        # approach-subsample step the CLI runner doesn't have.
         gripper = actions[:, 7] >= 0.5
         grasp_committed = gripper.sum() >= self.grasp_commit_grip_frac * len(gripper)
         if len(actions) > 1:
@@ -311,10 +324,17 @@ class DashboardState:
             total_travel = 0.0
         is_fine = total_travel < self.fine_refinement_travel_rad
         if grasp_committed:
+            # Never thin out the grasp chunk — every waypoint matters here.
             return actions
         if is_fine and self.exec_rows > 0:
             return actions[:max(1, self.exec_rows)]
-        return actions
+        # Approach (large free-space travel): each row is a separate
+        # accel-to-zero/decel-to-zero move, so executing all ~10 waypoints is
+        # the dominant cost. Evenly subsample to at most approach_max_rows
+        # (always keeping the terminal waypoint) to cut the stop-go count.
+        # The driver's velocity cap + per-substep angular ceiling still bound
+        # the larger inter-waypoint jumps. 0 disables (run every row).
+        return _subsample_rows(actions, self.approach_max_rows)
 
     # ----- runtime knobs (offsets + resolution) -----
 
@@ -708,12 +728,15 @@ $("#btn-ms-restart").addEventListener("click", () => msPost("restart"));
 $("#btn-ms-stop").addEventListener("click", () => msPost("stop"));
 
 (async () => {
-  await mountCameras();
+  // Bring the controls up FIRST and never block them on camera negotiation:
+  // WebRTC setup + the MJPEG-fallback watchdog can take several seconds, and
+  // the task dropdown / Run button / status poller must be usable immediately.
   await loadTasks();
   await loadResolutions();
   await loadOffsets();
   setInterval(refreshStatus, 1500);
   refreshStatus();
+  mountCameras();  // fire-and-forget; streams appear when ready
 })();
 </script>
 </body>
@@ -912,7 +935,12 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--host", default="0.0.0.0")
     ap.add_argument("--molmoact-url", default="http://localhost:8000")
     ap.add_argument("--rest-step-time-s", type=float, default=2.5)
-    ap.add_argument("--exec-rows", type=int, default=3)
+    ap.add_argument("--exec-rows", type=int, default=3,
+                    help="rows to run for a FINE-refinement chunk (small travel).")
+    ap.add_argument("--approach-exec-rows", type=int, default=4,
+                    help="max rows to run for an APPROACH chunk (large free-space "
+                         "travel); evenly subsampled, terminal waypoint kept. "
+                         "Lower = fewer stop-go moves = faster approach. 0 = run all rows.")
     ap.add_argument("--grasp-commit-grip-frac", type=float, default=0.5)
     ap.add_argument("--fine-refinement-travel-rad", type=float, default=0.2)
     ap.add_argument("--max-chunks", type=int, default=30,
@@ -957,6 +985,7 @@ def main(argv: list[str] | None = None) -> int:
         exec_rows=args.exec_rows,
         grasp_commit_grip_frac=args.grasp_commit_grip_frac,
         fine_refinement_travel_rad=args.fine_refinement_travel_rad,
+        approach_max_rows=args.approach_exec_rows,
         max_chunks=args.max_chunks,
         motion_server=motion_server,
     )
