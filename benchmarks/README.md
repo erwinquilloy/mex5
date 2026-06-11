@@ -130,7 +130,7 @@ Workspace prep:
   `/dev/video*`, so a bare `ls /dev/video*` is misleading. Use
   `v4l2-ctl --list-devices` and pick the two indices that are *not* under
   "Intel RealSense" (on `airscan4`: index `2` = left cam, index `0` = right cam;
-  both produce horizontally mirrored output and need `FLIP_H=1`).
+  no flip needed — raw output is spatially correct).
 - Franka in white/unlocked state, FCI activated (see `franka/python/basic.py`).
 
 ### 3. Run
@@ -139,13 +139,13 @@ Common env vars (cameras + model server):
 
 ```bash
 # Two external webcams at the back of the arm, 45° inward — stacked left→right.
-# Both cameras produce a horizontally mirrored image and need FLIP_H=1.
 export FRANKA_BENCH_EXT_INDEX=2          # left physical cam  (airscan4: /dev/video2)
-export FRANKA_BENCH_EXT_FLIP_H=1
 export FRANKA_BENCH_EXT_INDEX2=0         # right physical cam (airscan4: /dev/video0)
-export FRANKA_BENCH_EXT2_FLIP_H=1
+# No per-camera flip needed: raw output is spatially correct.
 export FRANKA_BENCH_CAM_W=640            # RealSense D455 has no 256x256 mode
 export FRANKA_BENCH_CAM_H=480
+export FRANKA_BENCH_REST_CAM_DZ_M=-0.05  # 5 cm downward TCP offset at grasp (REST/MCP)
+export FRANKA_BENCH_FCI_CAM_DZ_M=-0.05   # same for FCI
 # optional: FRANKA_BENCH_WRIST_SERIAL=<D457 serial>  to pin the wrist cam
 ```
 
@@ -314,11 +314,9 @@ Common env vars (cameras):
 ```bash
 cd ~/mex5
 # Two external webcams at the back of the arm, 45° inward — stacked left→right.
-# Both cameras produce a horizontally mirrored image and need FLIP_H=1.
 export FRANKA_BENCH_EXT_INDEX=2            # left physical cam  (airscan4: /dev/video2)
-export FRANKA_BENCH_EXT_FLIP_H=1
 export FRANKA_BENCH_EXT_INDEX2=0           # right physical cam (airscan4: /dev/video0)
-export FRANKA_BENCH_EXT2_FLIP_H=1
+# No per-camera flip needed: raw output is already spatially correct.
 # optional: export FRANKA_BENCH_WRIST_SERIAL=<D457 serial>
 # Per-camera rotation if needed: FRANKA_BENCH_EXT_ROT_DEG / FRANKA_BENCH_EXT2_ROT_DEG ∈ {0,90,180,270}
 ```
@@ -335,7 +333,7 @@ python -m benchmarks.scripts.serve_dashboard \
 
 One-liner:
 ```bash
-FRANKA_BENCH_EXT_INDEX=2 FRANKA_BENCH_EXT_FLIP_H=1 FRANKA_BENCH_EXT_INDEX2=0 FRANKA_BENCH_EXT2_FLIP_H=1 FRANKA_HOST=192.168.2.100 python -m benchmarks.scripts.serve_dashboard --port 8080 --molmoact-url http://localhost:8000
+FRANKA_BENCH_EXT_INDEX=2 FRANKA_BENCH_EXT_INDEX2=0 FRANKA_HOST=192.168.2.100 python -m benchmarks.scripts.serve_dashboard --port 8080 --molmoact-url http://localhost:8000
 ```
 
 #### Launch (REST)
@@ -353,7 +351,7 @@ python -m benchmarks.scripts.serve_dashboard \
 
 One-liner:
 ```bash
-FRANKA_BENCH_EXT_INDEX=2 FRANKA_BENCH_EXT_FLIP_H=1 FRANKA_BENCH_EXT_INDEX2=0 FRANKA_BENCH_EXT2_FLIP_H=1 FRANKA_REST_HOST=192.168.2.1 python -m benchmarks.scripts.serve_dashboard --port 8080 --molmoact-url http://localhost:8000 --rest-step-time-s 2.5
+FRANKA_BENCH_EXT_INDEX=2 FRANKA_BENCH_EXT_INDEX2=0 FRANKA_REST_HOST=192.168.2.1 python -m benchmarks.scripts.serve_dashboard --port 8080 --molmoact-url http://localhost:8000 --rest-step-time-s 2.5
 ```
 
 > **Note:** MCP is no longer supported on the dashboard. Use FCI or
@@ -532,30 +530,23 @@ home manually.
 ```bash
 # Two external webcams (both at the back of the arm, 45° inward).
 # Stacked left→right into a single (H, 2W, 3) image before inference.
-# Both cameras produce a horizontally mirrored image — FLIP_H=1 corrects this.
 export FRANKA_BENCH_EXT_INDEX=2            # left physical cam  (airscan4: /dev/video2)
-export FRANKA_BENCH_EXT_FLIP_H=1
 export FRANKA_BENCH_EXT_INDEX2=0           # right physical cam (airscan4: /dev/video0)
-export FRANKA_BENCH_EXT2_FLIP_H=1
+# No per-camera flip needed: raw output is already spatially correct.
 export FRANKA_BENCH_CAM_W=640              # RealSense D455 has no 256x256 mode
 export FRANKA_BENCH_CAM_H=480
 # Per-camera rotation if needed: FRANKA_BENCH_EXT_ROT_DEG / FRANKA_BENCH_EXT2_ROT_DEG ∈ {0,90,180,270}
 
-# Required on the lab rig (airscan4): the wrist RealSense is currently mounted
-# UNDER the gripper (closer to the robot base than the original on-top mount),
-# so the cam → TCP forward offset is very small (DX ≈ +0.005 m, not the old
-# 0.08). DZ has not been remeasured for this mount yet — leave it commented
-# out until you've calibrated it (a single apple_on_plate trial with DZ unset
-# tells you whether the model is stopping above the object or colliding into it).
+# Required on the lab rig (airscan4): wrist RealSense mounted UNDER the gripper.
+# No X offset. 5 cm downward Z offset corrects the cam→TCP vertical gap so
+# the model's grasp terminal pose lands on the object rather than above it.
 # These DX/DZ values fire on the grasp chunk's terminal row only (the
 # default OFFSET_MODE=grasp_terminal). The 'always' mode is documented
 # below as an opt-in for whole-trajectory perception bias; not recommended
 # on FCI (orientation drift from per-row IK branch flips) and only on REST
 # with the two-phase fast time DISABLED.
-export FRANKA_BENCH_REST_CAM_DX_M=0.005    # wrist-cam → TCP X offset (REST/MCP)
-# export FRANKA_BENCH_REST_CAM_DZ_M=...    # unset until remeasured for new mount
-export FRANKA_BENCH_FCI_CAM_DX_M=0.005     # same for FCI (terminal-pose only)
-# export FRANKA_BENCH_FCI_CAM_DZ_M=...     # unset until remeasured for new mount
+export FRANKA_BENCH_REST_CAM_DZ_M=-0.05    # wrist-cam → TCP Z offset, 5 cm down (REST/MCP)
+export FRANKA_BENCH_FCI_CAM_DZ_M=-0.05     # same for FCI (terminal-pose only)
 
 # Wrist-cam reorientation (added after the under-gripper relocation, since the
 # camera body sits in a different orientation than the DROID-canonical mount).
