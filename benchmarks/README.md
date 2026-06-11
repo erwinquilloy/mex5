@@ -310,15 +310,28 @@ FCI and MCP were removed from the dashboard; the CLI runner
   0.08 m) from the pickup XY. Configurable per trial from the panel; set
   to 0 to disable. If a task ever gets a `target_zone_xy` defined, that
   static box takes precedence.
-- **Grasp-fail detection:** if the previous chunk commanded close but
+- **Autonomous grasp retry:** if the previous chunk commanded close but
   the gripper width is now < 5 mm (jaws closed-empty), the dashboard
-  logs a `grasp_fail` warning and bumps `grasp_fail_count` in the trial
-  result payload.
-- **Hold-empty guard:** if no successful grasp has been observed this
-  trial yet, open commands are suppressed while the jaws are
-  closed-empty (the "open" is just noise — there's nothing to release).
-  Blocks the policy's natural retry-after-fail opens; use **Stop** to
-  re-home and re-try by hand.
+  treats it as a missed grasp: force-opens the jaws, drops the chunk
+  the policy planned from the (now stale) closed-empty state, and
+  re-prompts MolmoAct2 on the next iteration with fresh cameras + open
+  jaws so the model can re-plan a corrected approach from vision. The
+  same code path catches mid-transport slips: if you were holding the
+  object and it falls out, the next chunk's empty-jaw reading triggers
+  the same retry. Budgeted by `grasp_retry_limit` (default 3, exposed
+  in the dashboard panel + sent on each `/api/task` POST). On a
+  successful grasp the budget resets so a later slip + re-grasp gets
+  its own allowance. On budget exhaustion the trial bails with
+  `stopped_by="grasp_retry_budget_exhausted"`. The result payload
+  reports `grasp_fail_count`, `grasp_retries_used`, `grasp_retry_limit`,
+  and `ever_held` so each failure mode is distinguishable from the
+  payload alone.
+- **Persisted settings:** the four runtime knobs (XYZ offsets,
+  resolution, hold-min-dist, retry budget) are saved to
+  `~/.cache/mex5_dashboard_settings.json` (override with
+  `--settings-file`) on every apply / Run click and reloaded at startup.
+  Tune once, restart freely, your inputs come back with the values you
+  left. Reset by deleting the file.
 
 ### Prerequisites
 
@@ -408,6 +421,7 @@ stop the motion_server subprocess on exit.
 | `--no-webrtc` | off | force MJPEG even if `aiortc` is installed |
 | `--motion-server-bin` | autodetect | path to the motion_server binary; defaults to `<repo>/franka/cpp/build/motion_server` |
 | `--motion-server-log` | unset | write motion_server stdout+stderr to this file |
+| `--settings-file` | `~/.cache/mex5_dashboard_settings.json` | JSON file persisting the runtime knobs across restarts |
 
 ### REST endpoints (for debugging / scripting)
 
@@ -417,9 +431,10 @@ stop the motion_server subprocess on exit.
 | `/api/tasks` | GET | enumerate the Table 6 tasks + their `target_zone_xy` |
 | `/api/resolutions` | GET | available presets + current |
 | `/api/resolution` | POST `{width, height, fps}` | swap presets |
-| `/api/offsets` | GET / POST `{dx, dy, dz}` | read or write wrist-cam offsets |
+| `/api/offsets` | GET / POST `{dx, dy, dz}` | read or write wrist-cam offsets (persisted on POST) |
+| `/api/preferences` | GET | persisted trial knobs (hold-min-dist, retry budget) for UI repopulation |
 | `/api/home` | POST | drive to home |
-| `/api/task` | POST `{task_id, instruction, max_chunks, hold_min_dist_m}` | run one trial |
+| `/api/task` | POST `{task_id, instruction, max_chunks, hold_min_dist_m, grasp_retry_limit}` | run one trial (persists hold-min-dist + retry budget) |
 | `/api/stop` | POST | signal abort; trial loop interrupts current chunk + homes |
 | `/api/motion_server/{start,stop,restart,status}` | POST/GET | manage the subprocess |
 
