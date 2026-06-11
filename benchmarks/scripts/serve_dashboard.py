@@ -39,7 +39,10 @@ from flask import Flask, Response, jsonify, request
 from benchmarks.benchmark.dashboard_camera import DashboardCamera, from_env as camera_from_env
 from benchmarks.benchmark.driver_errors import CollisionAborted
 from benchmarks.benchmark import droid_tasks
-from benchmarks.benchmark.droid_runner import _enforce_hold_until_target
+from benchmarks.benchmark.droid_runner import (
+    _enforce_hold_until_target,
+    _enforce_hold_until_transported,
+)
 from benchmarks.benchmark.molmoact_droid_client import DroidClient
 from benchmarks.benchmark.transport import make_driver
 
@@ -236,7 +239,8 @@ class DashboardState:
         return {"ok": True, "info": "homed via rest"}
 
     def do_task(self, instruction: str, max_chunks: Optional[int] = None,
-                task_id: Optional[str] = None) -> dict:
+                task_id: Optional[str] = None,
+                hold_min_dist_m: float = 0.08) -> dict:
         """Run a full trial loop: capture → infer → exec, repeated up to
         max_chunks (or self.max_chunks if None) or until /api/stop is hit.
 
@@ -261,6 +265,7 @@ class DashboardState:
         total_server_ms = 0.0
         total_rtt_ms = 0.0
         total_suppressed = 0
+        grasp_xy: Optional[tuple[float, float]] = None
         stopped_by = "max_chunks"
         for chunk_i in range(cap):
             if self._stop_event.is_set():
@@ -282,10 +287,10 @@ class DashboardState:
                 num_steps=10,
             )
             rows = self._select_rows(pred.actions)
-            if target_zone is not None:
-                # Copy so we don't mutate pred.actions (kept verbatim for any
-                # later inspection / logging).
+            # Copy once if either guard is active; both helpers mutate in place.
+            if target_zone is not None or hold_min_dist_m > 0.0:
                 rows = np.asarray(rows, dtype=np.float64).copy()
+            if target_zone is not None:
                 n_supp = _enforce_hold_until_target(
                     rows, float(state8[7]), target_zone,
                 )
@@ -295,6 +300,22 @@ class DashboardState:
                         "hold-until-target: kept gripper closed on %d/%d row(s) "
                         "(%s chunk %d) — policy tried to release outside target zone",
                         n_supp, len(rows), task_id, chunk_i + 1,
+                    )
+            elif hold_min_dist_m > 0.0:
+                # No fixed zone — fall back to the "must transport ≥ min_dist"
+                # heuristic. grasp_xy persists across chunks of this trial.
+                n_supp, grasp_xy = _enforce_hold_until_transported(
+                    rows, np.asarray(state8, dtype=np.float64),
+                    grasp_xy, hold_min_dist_m,
+                )
+                if n_supp > 0:
+                    total_suppressed += n_supp
+                    log.warning(
+                        "hold-until-transported: kept gripper closed on %d/%d "
+                        "row(s) (%s chunk %d) — policy tried to release within "
+                        "%.3f m of pickup",
+                        n_supp, len(rows), task_id or "custom", chunk_i + 1,
+                        hold_min_dist_m,
                     )
             try:
                 with self._driver_lock:
@@ -341,6 +362,7 @@ class DashboardState:
             "last_rows_received": last_pred_rows,
             "last_rows_executed": last_exec_rows,
             "hold_until_target": target_zone is not None,
+            "hold_min_dist_m": hold_min_dist_m if target_zone is None else None,
             "gripper_open_suppressed": total_suppressed,
         }
 
@@ -480,6 +502,18 @@ _INDEX_HTML = """<!doctype html>
     <select id="res-select"></select>
     <button id="btn-apply-res">apply</button>
     <span id="res-current" style="color:#bbb; font-size:0.85rem;"></span>
+  </div>
+</div>
+
+<div class="panel">
+  <h3>hold-until-transported guard</h3>
+  <div class="row">
+    <label for="hold-min-dist">min transport (m):</label>
+    <input id="hold-min-dist" type="number" step="0.01" min="0" value="0.08">
+    <span style="color:#bbb; font-size:0.8rem;">
+      0 = disable. Suppresses gripper-open commands within this radius of
+      the pickup point. Ignored when the task has a fixed target_zone_xy.
+    </span>
   </div>
 </div>
 
@@ -711,6 +745,7 @@ $("#btn-run").addEventListener("click", async () => {
       task_id: opt.value,
       instruction: opt.dataset.instruction,
       max_chunks: Number(opt.dataset.maxChunks),
+      hold_min_dist_m: Number($("#hold-min-dist").value),
     }),
   });
   status.textContent = JSON.stringify(await r.json());
@@ -920,13 +955,19 @@ def make_app(state: DashboardState, fps: float = 30.0, webrtc=None) -> Flask:
         instruction = (body.get("instruction") or "").strip()
         task_id = body.get("task_id")
         max_chunks = body.get("max_chunks")
+        try:
+            hold_min_dist_m = float(body.get("hold_min_dist_m", 0.08))
+        except (TypeError, ValueError):
+            hold_min_dist_m = 0.08
         if not instruction:
             return jsonify({"ok": False, "error": "instruction is required"}), 400
         if not state.action_lock.acquire(f"task:{task_id or 'custom'}"):
             return jsonify({"ok": False, "error": "another action is in progress"}), 409
         try:
             try:
-                result = state.do_task(instruction, max_chunks=max_chunks, task_id=task_id)
+                result = state.do_task(instruction, max_chunks=max_chunks,
+                                       task_id=task_id,
+                                       hold_min_dist_m=hold_min_dist_m)
                 result["instruction"] = instruction
                 if task_id:
                     result["task_id"] = task_id

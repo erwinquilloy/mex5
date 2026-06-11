@@ -57,6 +57,50 @@ def _enforce_hold_until_target(
     return suppressed
 
 
+def _enforce_hold_until_transported(
+    actions: np.ndarray,
+    state8: np.ndarray,
+    grasp_xy: Optional[tuple[float, float]],
+    min_dist_m: float,
+    grip_threshold: float = 0.5,
+) -> tuple[int, Optional[tuple[float, float]]]:
+    """Heuristic alternative to _enforce_hold_until_target for setups where the
+    target destination is not a fixed XY box (e.g. a plate moved around between
+    trials).
+
+    Idea: capture the TCP XY at the first chunk where we observe the gripper
+    holding an object, treat that as the pickup point, and suppress any later
+    gripper-open whose commanded TCP XY is within ``min_dist_m`` of it. So the
+    arm must physically transport the object at least ``min_dist_m`` (Euclidean
+    in base-frame XY) before a policy-commanded release is honoured.
+
+    Mutates ``actions[:, 7]`` in place. Returns
+    ``(n_rows_suppressed, updated_grasp_xy)`` -- the caller persists
+    ``grasp_xy`` across chunks of one trial and resets it when the gripper is
+    no longer holding (so the next pickup gets its own reference point).
+
+    ``min_dist_m <= 0`` disables the guard.
+    """
+    if min_dist_m <= 0.0:
+        return 0, grasp_xy
+    width = float(state8[7])
+    if not _is_holding(width):
+        # No object in the jaws -- reset so the next grasp re-anchors.
+        return 0, None
+    if grasp_xy is None:
+        grasp_xy = _row_tcp_xy(state8)
+    gx, gy = grasp_xy
+    r2 = float(min_dist_m) ** 2
+    suppressed = 0
+    for i in range(len(actions)):
+        if actions[i, 7] < grip_threshold:
+            x, y = _row_tcp_xy(actions[i])
+            if (x - gx) ** 2 + (y - gy) ** 2 < r2:
+                actions[i, 7] = 1.0
+                suppressed += 1
+    return suppressed, grasp_xy
+
+
 def _prompt_setup(task: DroidTask, trial: int) -> bool:
     print("\n" + "=" * 70)
     print(f"[{task.task_id}] trial {trial + 1}/{task.trials}")
