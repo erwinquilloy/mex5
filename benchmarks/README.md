@@ -787,10 +787,14 @@ cd ~/erwin/mex5
 unset FRANKA_HOST                          # avoid transport confusion
 export FRANKA_REST_HOST=192.168.2.1        # motion_server box, NOT the robot
 
-# Two-phase approach speed (recommended on this rig): race through free
-# space at 2.0 s/row, then drop to the slow --rest-step-time-s the moment
-# the commanded TCP Z is at or below 20 cm. Comment out either var to fall
-# back to single-speed.
+# Two-phase approach speed is now ON by default (FAST=2.0 s, ZONE=0.20 m):
+# race through free space at 2.0 s/row, then drop to the slow
+# --rest-step-time-s the moment the commanded TCP Z is at or below 20 cm.
+# These exports are only needed to override the defaults; set FAST equal to
+# --rest-step-time-s (or push ZONE above the workspace) to fall back to
+# single-speed. NOTE: the EE linear-velocity cap also defaults to 0.4 m/s
+# (FRANKA_BENCH_REST_MAX_LIN_M_S) — that cap governs the long approach legs
+# and is the dominant speedup lever; lower it if the traverse feels fast.
 export FRANKA_BENCH_REST_FAST_STEP_TIME_S=2.0
 export FRANKA_BENCH_REST_SLOW_ZONE_Z_M=0.20
 

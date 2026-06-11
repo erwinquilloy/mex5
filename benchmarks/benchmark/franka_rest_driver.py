@@ -61,11 +61,14 @@ Tunable via env vars (all optional):
                                         FRANKA_BENCH_REST_SLOW_ZONE_Z_M. Free
                                         space → race through; only the default
                                         --rest-step-time-s is used near the
-                                        table. Both env vars must be set to
-                                        enable the two-phase behavior.
+                                        table. Default 2.0 s; two-phase is ON by
+                                        default (set FAST == step_time_s, or
+                                        SLOW_ZONE_Z_M very high, to disable).
+                                        Values ≤ 1.0 s trip a reflex abort on
+                                        the first chunk out of home — don't.
     FRANKA_BENCH_REST_SLOW_ZONE_Z_M     TCP Z (m, base frame) at and below
                                         which the slow time applies. Roughly
-                                        "table height + 20 cm".
+                                        "table height + 20 cm". Default 0.20 m.
 """
 from __future__ import annotations
 
@@ -84,6 +87,15 @@ _HOME_Q = np.array([0., -np.pi/4, 0., -3*np.pi/4, 0., np.pi/2, np.pi/4], dtype=n
 _GRIPPER_MAX_M = 0.08
 _DEFAULT_REST_STEP_TIME_S = 2.5
 _DEFAULT_HOME_TIME_S = 3.0
+# Two-phase approach defaults (ON by default): race through free space at
+# FAST_STEP_TIME, drop back to the slow step_time_s only inside SLOW_ZONE_Z
+# (near the table) where grasp precision matters. 2.0 s is the README's
+# documented safe floor on this rig — shorter (≤ 1.0 s) trips
+# `cartesian_motion_generator_joint_acceleration_discontinuity` on the first
+# chunk out of home. The bigger approach speedup comes from the raised linear
+# velocity cap (MAX_LIN_M_S), which governs the long distance-limited legs.
+_DEFAULT_FAST_STEP_TIME_S = 2.0
+_DEFAULT_SLOW_ZONE_Z_M = 0.20
 
 # Server-side hard limits, copied here so we don't post things the server will
 # silently drop.
@@ -163,7 +175,7 @@ class FrankaRestDriver:
             os.environ.get("FRANKA_BENCH_REST_MAX_OMEGA_DEG_S", "45.0")
         )
         self._max_lin_m_s = float(
-            os.environ.get("FRANKA_BENCH_REST_MAX_LIN_M_S", "0.25")
+            os.environ.get("FRANKA_BENCH_REST_MAX_LIN_M_S", "0.4")
         )
         self._min_step_time_s = max(
             _SERVER_MIN_STEP_TIME_S,
@@ -190,14 +202,18 @@ class FrankaRestDriver:
             )
         self._cam_offset_mode = _mode
 
-        # Two-phase approach speed. When BOTH env vars are set, rows whose FK'd
-        # target TCP Z is at or above SLOW_ZONE_Z_M use FAST_STEP_TIME_S
-        # instead of the default step_time_s. Idea: race the gripper through
-        # free space, slow down only inside the "approach zone" near the table
-        # where precision matters. Leave either var unset to keep the original
-        # single-speed behavior.
-        _fast = os.environ.get("FRANKA_BENCH_REST_FAST_STEP_TIME_S")
-        _zone = os.environ.get("FRANKA_BENCH_REST_SLOW_ZONE_Z_M")
+        # Two-phase approach speed (ON by default). Rows whose FK'd target TCP Z
+        # is at or above SLOW_ZONE_Z_M use FAST_STEP_TIME_S instead of the
+        # default step_time_s. Idea: race the gripper through free space, slow
+        # down only inside the "approach zone" near the table where precision
+        # matters. To disable, set FAST_STEP_TIME_S equal to step_time_s (or
+        # push SLOW_ZONE_Z_M above the workspace).
+        _fast = os.environ.get(
+            "FRANKA_BENCH_REST_FAST_STEP_TIME_S", str(_DEFAULT_FAST_STEP_TIME_S)
+        )
+        _zone = os.environ.get(
+            "FRANKA_BENCH_REST_SLOW_ZONE_Z_M", str(_DEFAULT_SLOW_ZONE_Z_M)
+        )
         self._fast_step_time_s: Optional[float] = float(_fast) if _fast else None
         self._slow_zone_z_m: Optional[float] = float(_zone) if _zone else None
 

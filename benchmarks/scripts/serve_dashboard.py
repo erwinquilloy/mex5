@@ -472,6 +472,25 @@ function mountMjpeg(slotId, tagId, src) {
   if (tag) { tag.textContent = "[mjpeg]"; tag.style.color = "#777"; }
 }
 
+// aiortc is non-trickle: it ignores ICE candidates sent after the offer, so
+// we must let the browser finish gathering host candidates and POST the
+// completed SDP. Skipping this leaves the PC unable to connect — the <video>
+// mounts but never receives media (frozen/blank panel).
+function waitForIceGathering(pc) {
+  if (pc.iceGatheringState === "complete") return Promise.resolve();
+  return new Promise((resolve) => {
+    const check = () => {
+      if (pc.iceGatheringState === "complete") {
+        pc.removeEventListener("icegatheringstatechange", check);
+        resolve();
+      }
+    };
+    pc.addEventListener("icegatheringstatechange", check);
+    // Safety net: some browsers never fire 'complete' for host-only candidates.
+    setTimeout(resolve, 2000);
+  });
+}
+
 async function mountWebRTC(slotId, tagId, cam) {
   const el = document.getElementById(slotId);
   el.innerHTML = '<video autoplay playsinline muted></video>';
@@ -481,6 +500,7 @@ async function mountWebRTC(slotId, tagId, cam) {
   pc.ontrack = (ev) => { if (ev.track.kind === "video") video.srcObject = ev.streams[0]; };
   const offer = await pc.createOffer();
   await pc.setLocalDescription(offer);
+  await waitForIceGathering(pc);
   const r = await fetch(`/offer/${cam}`, {
     method: "POST",
     headers: {"Content-Type": "application/json"},
