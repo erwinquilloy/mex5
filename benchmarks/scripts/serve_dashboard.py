@@ -439,7 +439,7 @@ refreshStatus();
 
 # ---------- Flask app ----------
 
-def make_app(state: DashboardState, fps: float = 10.0,
+def make_app(state: DashboardState, fps: float = 30.0,
              webrtc=None) -> Flask:
     app = Flask(__name__)
     period = 1.0 / max(fps, 1.0)
@@ -567,7 +567,7 @@ def main(argv: list[str] | None = None) -> int:
                     help="safety cap on action chunks per dashboard trial. "
                          "Matches the CLI runner's --max-chunks default (also "
                          "the per-task max_chunks in droid_tasks.py).")
-    ap.add_argument("--mjpeg-fps", type=float, default=10.0)
+    ap.add_argument("--mjpeg-fps", type=float, default=30.0)
     ap.add_argument("--no-webrtc", action="store_true",
                     help="disable WebRTC streaming and force MJPEG even if "
                          "aiortc is installed (useful when troubleshooting).")

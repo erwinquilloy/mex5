@@ -91,10 +91,14 @@ _SERVER_MIN_STEP_TIME_S = 0.5
 # airscan4 lab rig workspace safe box (base-frame metres). Every commanded
 # TCP X/Y gets clamped into this box before being sent to motion_server, so a
 # bad cam-offset or out-of-distribution policy output can't drive the gripper
-# past the rig's safe reach. Z is intentionally not clipped — the slow-zone
-# logic and table contact handle Z.
+# past the rig's safe reach. Z is clamped to a table floor so a large
+# downward cam offset descends to the table but never pushes through it.
 _LAB_X_MIN, _LAB_X_MAX = 0.0, 0.57
 _LAB_Y_MIN, _LAB_Y_MAX = -0.4, 0.4
+# Minimum commanded TCP height above the robot base. The grasp descent uses a
+# deliberately large downward cam offset (e.g. -0.25 m) to drive the gripper
+# all the way to the table; this floor stops it at table contact height.
+_LAB_Z_MIN = 0.016
 
 
 @dataclass
@@ -331,7 +335,10 @@ class FrankaRestDriver:
         t_sec: float,
         lock_down: bool,
         apply_cam_offset: bool = False,
-    ) -> None:
+    ) -> bool:
+        """Move the TCP to the FK of ``q_target`` (optionally cam-offset).
+        Returns True if the commanded Z was clamped up to the table floor
+        (``_LAB_Z_MIN``), i.e. the arm bottomed out at table contact height."""
         import panda_py
         cur = self.get_state()
         T_cur = panda_py.fk(cur.q.astype(np.float64))
@@ -344,13 +351,17 @@ class FrankaRestDriver:
             z_t += self._cam_dz_m
         x_clipped = min(_LAB_X_MAX, max(_LAB_X_MIN, x_t))
         y_clipped = min(_LAB_Y_MAX, max(_LAB_Y_MIN, y_t))
-        if x_clipped != x_t or y_clipped != y_t:
+        z_clipped = max(_LAB_Z_MIN, z_t)
+        z_floor_hit = z_clipped != z_t
+        if x_clipped != x_t or y_clipped != y_t or z_floor_hit:
             print(
-                f"[FrankaRestDriver] clamped TCP target XY ({x_t:+.3f}, {y_t:+.3f}) "
-                f"-> ({x_clipped:+.3f}, {y_clipped:+.3f}) m to lab box "
-                f"X[{_LAB_X_MIN:.2f},{_LAB_X_MAX:.2f}] Y[{_LAB_Y_MIN:+.2f},{_LAB_Y_MAX:+.2f}]"
+                f"[FrankaRestDriver] clamped TCP target XYZ "
+                f"({x_t:+.3f}, {y_t:+.3f}, {z_t:+.3f}) -> "
+                f"({x_clipped:+.3f}, {y_clipped:+.3f}, {z_clipped:+.3f}) m to lab box "
+                f"X[{_LAB_X_MIN:.2f},{_LAB_X_MAX:.2f}] Y[{_LAB_Y_MIN:+.2f},{_LAB_Y_MAX:+.2f}] "
+                f"Z[>= {_LAB_Z_MIN:.3f}]"
             )
-        x_t, y_t = x_clipped, y_clipped
+        x_t, y_t, z_t = x_clipped, y_clipped, z_clipped
         a_c, b_c, g_c = _zyx_euler_from_R(T_cur[:3, :3])
         a_t, b_t, g_t = _zyx_euler_from_R(T_tgt[:3, :3])
 
@@ -361,6 +372,7 @@ class FrankaRestDriver:
         )
         for xf, yf, zf, tf, da, db, dg in substeps:
             self._post("moveToCartesian", [xf, yf, zf, tf, da, db, dg])
+        return z_floor_hit
 
     def _set_gripper(self, close: bool) -> None:
         if self._last_grip is not None and close == self._last_grip:
@@ -405,7 +417,6 @@ class FrankaRestDriver:
         for i, row in enumerate(actions):
             q_target = row[:7]
             close = bool(row[7] >= grip_threshold)
-            self._set_gripper(close)
             t_sec = slow_t_sec
             if two_phase:
                 try:
@@ -420,12 +431,28 @@ class FrankaRestDriver:
                 cam_offset = (i == last_idx)
             else:  # grasp_terminal
                 cam_offset = (i == last_idx and is_grasp_chunk)
-            self._move_to_q(
-                q_target,
-                t_sec=t_sec,
-                lock_down=lock_gripper_down,
-                apply_cam_offset=cam_offset,
-            )
+            if cam_offset and close:
+                # Grasp descent: drive down with the (large) cam Z offset,
+                # which the _LAB_Z_MIN floor stops at table-contact height,
+                # THEN close — so the jaws don't shut in mid-air and bulldoze
+                # the object on the way down. Keep the gripper open during the
+                # descent itself.
+                self._set_gripper(False)
+                self._move_to_q(
+                    q_target,
+                    t_sec=t_sec,
+                    lock_down=lock_gripper_down,
+                    apply_cam_offset=True,
+                )
+                self._set_gripper(True)
+            else:
+                self._set_gripper(close)
+                self._move_to_q(
+                    q_target,
+                    t_sec=t_sec,
+                    lock_down=lock_gripper_down,
+                    apply_cam_offset=cam_offset,
+                )
 
     # ----- lifecycle -----
 

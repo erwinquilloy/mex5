@@ -144,8 +144,8 @@ export FRANKA_BENCH_EXT_INDEX2=0         # right physical cam (airscan4: /dev/vi
 # No per-camera flip needed: raw output is spatially correct.
 export FRANKA_BENCH_CAM_W=640            # RealSense D455 has no 256x256 mode
 export FRANKA_BENCH_CAM_H=480
-export FRANKA_BENCH_REST_CAM_DZ_M=-0.05  # 5 cm downward TCP offset at grasp (REST/MCP)
-export FRANKA_BENCH_FCI_CAM_DZ_M=-0.05   # same for FCI
+export FRANKA_BENCH_REST_CAM_DZ_M=-0.25  # large downward offset: drive to table at grasp; Z floor 0.016 stops it (REST/MCP)
+export FRANKA_BENCH_FCI_CAM_DZ_M=-0.05   # same idea for FCI (no Z floor there yet)
 # optional: FRANKA_BENCH_WRIST_SERIAL=<D457 serial>  to pin the wrist cam
 ```
 
@@ -391,7 +391,7 @@ releases the cameras.
 | `--rest-step-time-s` | `2.5` | per-row REST move time (REST/MCP only) |
 | `--exec-rows` | `3` | rows of each chunk to run when the policy is in fine-refinement mode |
 | `--max-chunks` | `30` | safety cap on chunks per **run trial** click. Mirrors the CLI runner's `--max-chunks`. |
-| `--mjpeg-fps` | `10.0` | MJPEG fallback refresh rate (ignored when WebRTC is active) |
+| `--mjpeg-fps` | `30.0` | MJPEG fallback refresh rate (ignored when WebRTC is active) |
 | `--no-webrtc` | off | force MJPEG streaming even if `aiortc` is installed (debugging aid) |
 
 ### Dashboard vs CLI runner
@@ -545,8 +545,8 @@ export FRANKA_BENCH_CAM_H=480
 # below as an opt-in for whole-trajectory perception bias; not recommended
 # on FCI (orientation drift from per-row IK branch flips) and only on REST
 # with the two-phase fast time DISABLED.
-export FRANKA_BENCH_REST_CAM_DZ_M=-0.05    # wrist-cam → TCP Z offset, 5 cm down (REST/MCP)
-export FRANKA_BENCH_FCI_CAM_DZ_M=-0.05     # same for FCI (terminal-pose only)
+export FRANKA_BENCH_REST_CAM_DZ_M=-0.25    # large downward offset: descend to table at grasp; clamped at Z floor 0.016 m (REST/MCP)
+export FRANKA_BENCH_FCI_CAM_DZ_M=-0.05     # FCI has no Z floor yet — keep small (terminal-pose only)
 
 # Wrist-cam reorientation (added after the under-gripper relocation, since the
 # camera body sits in a different orientation than the DROID-canonical mount).
@@ -604,29 +604,38 @@ export FRANKA_BENCH_REST_CAM_DZ_M=-0.08
 ```
 Mirror with `FRANKA_BENCH_FCI_CAM_OFFSET_MODE` for FCI runs.
 
-#### Workspace XY safety clip (always on)
+#### Workspace XYZ safety clip (always on)
 
-Both drivers hard-clamp every commanded TCP target X/Y into the airscan4
-safe box before sending. This catches bad cam offsets, out-of-distribution
-policy actions, or an accidental `OFFSET_MODE=always` from pushing the
-gripper past the rig's reach. Z is intentionally not clipped — the
-slow-zone logic and table contact handle Z.
+The REST driver hard-clamps every commanded TCP target X/Y/Z into the
+airscan4 safe box before sending. X/Y catch bad cam offsets,
+out-of-distribution policy actions, or an accidental `OFFSET_MODE=always`.
+The Z floor lets the grasp descent use a deliberately large downward cam
+offset (`FRANKA_BENCH_REST_CAM_DZ_M=-0.25`) to drive the gripper all the
+way to the table without pushing through it — the descent stops at
+`_LAB_Z_MIN`.
 
 | Axis | Range (base-frame metres) |
 |---|---|
 | X | `[0.0, 0.57]` |
 | Y | `[-0.4, +0.4]` |
+| Z | `[0.016, ∞)` |
+
+On the grasp terminal row (gripper closing + cam offset applied), the
+driver descends to the clamped floor with the jaws **open**, then closes
+once at table height — so the gripper can't shut mid-air and bulldoze the
+object on the way down. See `send_chunk` in `franka_rest_driver.py`.
 
 If a row gets clamped, the driver prints one line per row, e.g.:
 
 ```
-[FrankaRestDriver] clamped TCP target XY (+0.612, -0.020) -> (+0.570, -0.020) m to lab box X[0.00,0.57] Y[-0.40,+0.40]
+[FrankaRestDriver] clamped TCP target XYZ (+0.420, -0.020, -0.180) -> (+0.420, -0.020, +0.016) m to lab box X[0.00,0.57] Y[-0.40,+0.40] Z[>= 0.016]
 ```
 
-Values are hardcoded in `franka_rest_driver.py` and `panda_driver.py`
-(`_LAB_X_MIN/MAX`, `_LAB_Y_MIN/MAX`). If you're running on a different
-rig, edit them there — there's intentionally no env var so it can't be
-disabled by accident.
+Values are hardcoded in `franka_rest_driver.py`
+(`_LAB_X_MIN/MAX`, `_LAB_Y_MIN/MAX`, `_LAB_Z_MIN`). If you're running on a
+different rig, edit them there — there's intentionally no env var so they
+can't be disabled by accident. (The X/Y clamp is also in `panda_driver.py`
+for the FCI path; the Z floor + descend-then-close is REST-only.)
 
 #### `--hold-until-target` (debug override)
 
