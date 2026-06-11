@@ -144,7 +144,7 @@ export FRANKA_BENCH_EXT_INDEX2=0         # right physical cam (airscan4: /dev/vi
 # No per-camera flip needed: raw output is spatially correct.
 export FRANKA_BENCH_CAM_W=640            # RealSense D455 has no 256x256 mode
 export FRANKA_BENCH_CAM_H=480
-export FRANKA_BENCH_REST_CAM_DZ_M=-0.25  # large downward offset: drive to table at grasp; Z floor 0.016 stops it (REST/MCP)
+export FRANKA_BENCH_REST_CAM_DZ_M=-0.09  # downward offset: drive toward table at grasp; Z floor 0.016 stops it (REST/MCP)
 export FRANKA_BENCH_FCI_CAM_DZ_M=-0.05   # same idea for FCI (no Z floor there yet)
 # optional: FRANKA_BENCH_WRIST_SERIAL=<D457 serial>  to pin the wrist cam
 ```
@@ -545,7 +545,7 @@ export FRANKA_BENCH_CAM_H=480
 # below as an opt-in for whole-trajectory perception bias; not recommended
 # on FCI (orientation drift from per-row IK branch flips) and only on REST
 # with the two-phase fast time DISABLED.
-export FRANKA_BENCH_REST_CAM_DZ_M=-0.25    # large downward offset: descend to table at grasp; clamped at Z floor 0.016 m (REST/MCP)
+export FRANKA_BENCH_REST_CAM_DZ_M=-0.09    # downward offset: descend toward table at grasp; clamped at Z floor 0.016 m (REST/MCP)
 export FRANKA_BENCH_FCI_CAM_DZ_M=-0.05     # FCI has no Z floor yet — keep small (terminal-pose only)
 
 # Wrist-cam reorientation (added after the under-gripper relocation, since the
@@ -610,7 +610,7 @@ The REST driver hard-clamps every commanded TCP target X/Y/Z into the
 airscan4 safe box before sending. X/Y catch bad cam offsets,
 out-of-distribution policy actions, or an accidental `OFFSET_MODE=always`.
 The Z floor lets the grasp descent use a deliberately large downward cam
-offset (`FRANKA_BENCH_REST_CAM_DZ_M=-0.25`) to drive the gripper all the
+offset (`FRANKA_BENCH_REST_CAM_DZ_M=-0.09`) to drive the gripper down
 way to the table without pushing through it — the descent stops at
 `_LAB_Z_MIN`.
 
