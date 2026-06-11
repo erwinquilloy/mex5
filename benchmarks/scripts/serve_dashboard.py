@@ -25,13 +25,14 @@ Cannot run alongside `run_droid_benchmark.py` -- both want the cameras.
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import os
 import subprocess
 import threading
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import numpy as np
 from flask import Flask, Response, jsonify, request
@@ -59,6 +60,54 @@ _RESOLUTIONS = [
     (848, 480, 30),
     (1280, 720, 30),
 ]
+
+
+_DEFAULT_SETTINGS_PATH = Path.home() / ".cache" / "mex5_dashboard_settings.json"
+
+
+class DashboardSettings:
+    """JSON-file persistence for the dashboard's runtime knobs.
+
+    Reads at startup, writes on every successful apply. The file is a flat
+    dict; missing keys mean "use the constructor default". The fields we
+    persist are:
+        - cam_offsets: {dx, dy, dz}
+        - resolution: {width, height, fps}
+        - hold_min_dist_m: float
+        - grasp_retry_limit: int
+    """
+
+    def __init__(self, path: Path):
+        self.path = path
+        self._cache: dict = self._read()
+
+    def _read(self) -> dict:
+        try:
+            return json.loads(self.path.read_text())
+        except FileNotFoundError:
+            return {}
+        except Exception as e:
+            log.warning("could not read settings file %s: %s", self.path, e)
+            return {}
+
+    def all(self) -> dict:
+        return dict(self._cache)
+
+    def get(self, key: str, default: Any = None) -> Any:
+        return self._cache.get(key, default)
+
+    def update(self, **kv) -> None:
+        # Drop keys whose value is None so callers can pass-through optionals
+        # without us clobbering the persisted value.
+        kv = {k: v for k, v in kv.items() if v is not None}
+        if not kv:
+            return
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            self._cache.update(kv)
+            self.path.write_text(json.dumps(self._cache, indent=2))
+        except Exception as e:
+            log.warning("could not save settings to %s: %s", self.path, e)
 
 
 def _build_webrtc_broadcaster():
@@ -198,6 +247,7 @@ class DashboardState:
         approach_max_rows: int = 4,
         max_chunks: int = 30,
         motion_server: Optional[MotionServerLauncher] = None,
+        settings: Optional[DashboardSettings] = None,
     ):
         self.molmoact_url = molmoact_url
         self.client = DroidClient(molmoact_url)
@@ -217,6 +267,7 @@ class DashboardState:
         )
         self.driver = make_driver(self.transport, step_time_s=self.rest_step_time_s)
         self.motion_server = motion_server or MotionServerLauncher(None)
+        self.settings = settings or DashboardSettings(_DEFAULT_SETTINGS_PATH)
         self.action_lock = _ActionLock()
         self._driver_lock = threading.Lock()
         self._stop_event = threading.Event()
@@ -472,12 +523,15 @@ class DashboardState:
             return 0.0, 0.0, 0.0
         return getter()
 
-    def set_cam_offsets(self, dx: float, dy: float, dz: float) -> dict:
+    def set_cam_offsets(self, dx: float, dy: float, dz: float,
+                        persist: bool = True) -> dict:
         setter = getattr(self.driver, "set_cam_offsets", None)
         if setter is None:
             return {"ok": False, "error": "driver does not support runtime cam offsets"}
         with self._driver_lock:
             setter(dx, dy, dz)
+        if persist:
+            self.settings.update(cam_offsets={"dx": dx, "dy": dy, "dz": dz})
         return {"ok": True, "dx": dx, "dy": dy, "dz": dz}
 
     def gripper_status(self) -> dict:
@@ -501,13 +555,51 @@ class DashboardState:
             label = "closed"
         return {"state": label, "width_m": round(w, 4)}
 
-    def set_resolution(self, width: int, height: int, fps: int) -> dict:
+    def set_resolution(self, width: int, height: int, fps: int,
+                       persist: bool = True) -> dict:
         try:
             self.camera.restart_with_resolution(width, height, fps)
         except Exception as e:
             return {"ok": False, "error": f"restart failed: {e}"}
         w, h, f = self.camera.resolution()
+        if persist:
+            self.settings.update(resolution={"width": w, "height": h, "fps": f})
         return {"ok": True, "width": w, "height": h, "fps": f}
+
+    def apply_persisted_settings(self) -> None:
+        """Reapply saved cam offsets + resolution on startup."""
+        offsets = self.settings.get("cam_offsets")
+        if offsets:
+            try:
+                self.set_cam_offsets(
+                    float(offsets["dx"]), float(offsets["dy"]), float(offsets["dz"]),
+                    persist=False,
+                )
+                log.info("loaded persisted cam offsets: %s", offsets)
+            except Exception as e:
+                log.warning("could not apply persisted cam offsets: %s", e)
+        res = self.settings.get("resolution")
+        if res:
+            try:
+                self.set_resolution(
+                    int(res["width"]), int(res["height"]), int(res["fps"]),
+                    persist=False,
+                )
+                log.info("loaded persisted resolution: %s", res)
+            except Exception as e:
+                log.warning("could not apply persisted resolution: %s", e)
+
+    def preferences(self) -> dict:
+        """Snapshot for the UI's loadPreferences()."""
+        dx, dy, dz = self.get_cam_offsets()
+        w, h, f = self.camera.resolution()
+        return {
+            "cam_offsets": {"dx": dx, "dy": dy, "dz": dz},
+            "resolution": {"width": w, "height": h, "fps": f},
+            "hold_min_dist_m": float(self.settings.get("hold_min_dist_m", 0.08)),
+            "grasp_retry_limit": int(self.settings.get("grasp_retry_limit", 3)),
+            "settings_path": str(self.settings.path),
+        }
 
     def close(self) -> None:
         try: self.camera.close()
@@ -859,6 +951,24 @@ async function loadOffsets() {
   $("#off-dz").value = j.dz;
 }
 
+async function loadPreferences() {
+  // Persisted trial knobs (hold-min-dist + retry budget). The offset and
+  // resolution panels already pull live driver/camera state, so we only
+  // need to repopulate the inputs that have no other source of truth.
+  const r = await fetch("/api/preferences");
+  if (!r.ok) return;
+  const j = await r.json();
+  if (typeof j.hold_min_dist_m === "number") {
+    $("#hold-min-dist").value = j.hold_min_dist_m;
+  }
+  if (typeof j.grasp_retry_limit === "number") {
+    $("#retry-limit").value = j.grasp_retry_limit;
+  }
+  if (j.settings_path) {
+    console.info("dashboard settings file:", j.settings_path);
+  }
+}
+
 $("#btn-home").addEventListener("click", async () => {
   $("#btn-home").disabled = true;
   const r = await fetch("/api/home", { method: "POST" });
@@ -935,6 +1045,7 @@ $("#btn-ms-stop").addEventListener("click", () => msPost("stop"));
   await loadTasks();
   await loadResolutions();
   await loadOffsets();
+  await loadPreferences();
   setInterval(refreshStatus, 1500);
   refreshStatus();
   mountCameras();  // fire-and-forget; streams appear when ready
@@ -1028,6 +1139,10 @@ def make_app(state: DashboardState, fps: float = 30.0, webrtc=None) -> Flask:
             })
         return jsonify({"tasks": out})
 
+    @app.route("/api/preferences")
+    def api_preferences():
+        return jsonify(state.preferences())
+
     @app.route("/api/resolutions")
     def api_resolutions():
         w, h, f = state.camera.resolution()
@@ -1102,6 +1217,10 @@ def make_app(state: DashboardState, fps: float = 30.0, webrtc=None) -> Flask:
             return jsonify({"ok": False, "error": "instruction is required"}), 400
         if not state.action_lock.acquire(f"task:{task_id or 'custom'}"):
             return jsonify({"ok": False, "error": "another action is in progress"}), 409
+        # Persist the just-used trial knobs so the next dashboard launch
+        # comes up with these values in the inputs.
+        state.settings.update(hold_min_dist_m=hold_min_dist_m,
+                              grasp_retry_limit=grasp_retry_limit)
         try:
             try:
                 result = state.do_task(instruction, max_chunks=max_chunks,
@@ -1169,6 +1288,9 @@ def main(argv: list[str] | None = None) -> int:
                          "<repo>/franka/cpp/build/motion_server if found.")
     ap.add_argument("--motion-server-log", default=None,
                     help="path to write motion_server stdout/stderr.")
+    ap.add_argument("--settings-file", default=None,
+                    help=f"path to the persisted dashboard settings JSON. "
+                         f"Defaults to {_DEFAULT_SETTINGS_PATH}.")
     args = ap.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO,
@@ -1194,6 +1316,13 @@ def main(argv: list[str] | None = None) -> int:
     else:
         log.warning("motion_server binary not found; the UI controls will be disabled.")
 
+    settings_path = (
+        Path(args.settings_file).expanduser().resolve()
+        if args.settings_file else _DEFAULT_SETTINGS_PATH
+    )
+    settings = DashboardSettings(settings_path)
+    log.info("dashboard settings file: %s", settings_path)
+
     state = DashboardState(
         molmoact_url=args.molmoact_url,
         rest_step_time_s=args.rest_step_time_s,
@@ -1203,7 +1332,9 @@ def main(argv: list[str] | None = None) -> int:
         approach_max_rows=args.approach_exec_rows,
         max_chunks=args.max_chunks,
         motion_server=motion_server,
+        settings=settings,
     )
+    state.apply_persisted_settings()
 
     webrtc = None if args.no_webrtc else _build_webrtc_broadcaster()
     if webrtc is not None:

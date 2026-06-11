@@ -105,6 +105,16 @@ def make_app() -> Flask:
         return jsonify({"ok": True, "dx": 0.0, "dy": 0.0, "dz": 0.0,
                         "info": "preview mode (no driver)"})
 
+    @app.route("/api/preferences")
+    def api_preferences():
+        return jsonify({
+            "cam_offsets": {"dx": 0.0, "dy": 0.0, "dz": 0.0},
+            "resolution": {"width": 640, "height": 480, "fps": 30},
+            "hold_min_dist_m": 0.08,
+            "grasp_retry_limit": 3,
+            "settings_path": "(preview mode — no file)",
+        })
+
     def _preview(*_a, **_kw):
         return jsonify({"ok": True, "info": "preview mode (no hardware)"})
 
