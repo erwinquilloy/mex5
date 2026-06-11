@@ -44,6 +44,8 @@ Tunable via env vars (all optional):
                                         forward offset from the gripper (e.g.
                                         0.08 if the RealSense sits +8 cm along
                                         +x of the TCP). Default 0.
+    FRANKA_BENCH_REST_CAM_DY_M          same idea for Y (cam sideways from TCP),
+                                        also terminal-only. Default 0.
     FRANKA_BENCH_REST_CAM_DZ_M          same idea for Z (cam above TCP), also
                                         terminal-only. Default 0.
     FRANKA_BENCH_REST_CAM_OFFSET_MODE   when the DX/DZ shift fires:
@@ -173,6 +175,7 @@ class FrankaRestDriver:
         # is mounted forward/above the gripper, every target needs to be shifted
         # by the same offset so the gripper lands where the cam sees the object.
         self._cam_dx_m = float(os.environ.get("FRANKA_BENCH_REST_CAM_DX_M", "0.0"))
+        self._cam_dy_m = float(os.environ.get("FRANKA_BENCH_REST_CAM_DY_M", "0.0"))
         self._cam_dz_m = float(os.environ.get("FRANKA_BENCH_REST_CAM_DZ_M", "0.0"))
         # When the cam offset fires:
         #   grasp_terminal (default) — last row of the grasp chunk only
@@ -267,6 +270,16 @@ class FrankaRestDriver:
         s = self.get_state()
         return np.concatenate([s.q, [s.gripper_width]], dtype=np.float32)
 
+    # ----- wrist-cam offset (runtime mutable; dashboard reads/writes these) -----
+
+    def get_cam_offsets(self) -> tuple[float, float, float]:
+        return self._cam_dx_m, self._cam_dy_m, self._cam_dz_m
+
+    def set_cam_offsets(self, dx: float, dy: float, dz: float) -> None:
+        self._cam_dx_m = float(dx)
+        self._cam_dy_m = float(dy)
+        self._cam_dz_m = float(dz)
+
     # ----- planning -----
 
     def _plan_substeps(
@@ -348,6 +361,7 @@ class FrankaRestDriver:
         x_t, y_t, z_t = float(T_tgt[0, 3]), float(T_tgt[1, 3]), float(T_tgt[2, 3])
         if apply_cam_offset:
             x_t += self._cam_dx_m
+            y_t += self._cam_dy_m
             z_t += self._cam_dz_m
         x_clipped = min(_LAB_X_MAX, max(_LAB_X_MIN, x_t))
         y_clipped = min(_LAB_Y_MAX, max(_LAB_Y_MIN, y_t))

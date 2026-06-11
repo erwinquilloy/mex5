@@ -1,21 +1,24 @@
 """Interactive web dashboard for the MolmoAct2-DROID rig.
 
-Shows live external webcam + wrist RealSense RGB streams, a "Home" button,
-and a task-instruction input that runs one inference->exec cycle per click.
-Auto-detects the robot transport (fci / rest) from env vars; a UI dropdown
-lets you switch without restarting. MCP is no longer supported on the
-dashboard -- use the CLI runner if you need MCP.
+Shows three live camera streams (2 external + 1 wrist RealSense RGB), a
+DROID task dropdown, runtime controls for camera resolution and wrist-cam
+XYZ offsets, a Home button, a Run Benchmark button, and a motion_server
+launcher (its initialize() runs goHome, so restarting it doubles as an arm
+reset).
 
-Run on the workstation that has the cameras:
-    pip install flask aiortc av    # aiortc/av only needed for WebRTC streaming
+Run on the workstation that has the cameras + motion_server:
+    pip install flask aiortc av     # aiortc/av only for WebRTC streaming
     export FRANKA_BENCH_EXT_INDEX=0
-    export FRANKA_MCP_URL=...   # or FRANKA_REST_HOST / FRANKA_HOST
+    export FRANKA_BENCH_EXT_INDEX2=1
+    export FRANKA_REST_HOST=192.168.2.1
     python -m benchmarks.scripts.serve_dashboard --port 8080
 Then open http://<workstation-ip>:8080/.
 
-Video streaming defaults to WebRTC (smoother / lower latency than MJPEG).
-Falls back to MJPEG automatically when aiortc/av aren't installed, or pass
---no-webrtc to force MJPEG.
+Video defaults to WebRTC (smoother / lower latency than MJPEG); falls back
+to MJPEG when aiortc/av aren't installed, or pass --no-webrtc to force it.
+
+FCI is no longer dashboard-supported; the CLI runner still has it. Only
+the REST transport (motion_server) is available here.
 
 Cannot run alongside `run_droid_benchmark.py` -- both want the cameras.
 """
@@ -24,8 +27,10 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import subprocess
 import threading
 import time
+from pathlib import Path
 from typing import Optional
 
 import numpy as np
@@ -33,10 +38,22 @@ from flask import Flask, Response, jsonify, request
 
 from benchmarks.benchmark.dashboard_camera import DashboardCamera, from_env as camera_from_env
 from benchmarks.benchmark.driver_errors import CollisionAborted
+from benchmarks.benchmark import droid_tasks
 from benchmarks.benchmark.molmoact_droid_client import DroidClient
-from benchmarks.benchmark.transport import autodetect_transport, make_driver
+from benchmarks.benchmark.transport import make_driver
 
 log = logging.getLogger("dashboard")
+
+
+# Resolution presets exposed via the UI dropdown. All are color modes that
+# D45x RealSense + typical USB webcams accept at 30 fps.
+_RESOLUTIONS = [
+    (320, 240, 30),
+    (424, 240, 30),
+    (640, 480, 30),
+    (848, 480, 30),
+    (1280, 720, 30),
+]
 
 
 def _build_webrtc_broadcaster():
@@ -77,21 +94,99 @@ class _ActionLock:
             return {"busy": self._busy, "what": self._what, "last": self._last}
 
 
+class MotionServerLauncher:
+    """Subprocess wrapper around franka/cpp/build/motion_server.
+
+    Starting motion_server runs its initialize() which calls goHome(), so
+    "restart motion_server" doubles as an arm-reset.
+    """
+    def __init__(self, bin_path: Optional[Path], log_path: Optional[Path] = None):
+        self.bin_path = Path(bin_path) if bin_path else None
+        self.log_path = log_path
+        self._proc: Optional[subprocess.Popen] = None
+        self._lock = threading.Lock()
+
+    def configured(self) -> bool:
+        return self.bin_path is not None and self.bin_path.exists()
+
+    def status(self) -> dict:
+        with self._lock:
+            running = self._proc is not None and self._proc.poll() is None
+            return {
+                "configured": self.configured(),
+                "bin_path": str(self.bin_path) if self.bin_path else None,
+                "running": running,
+                "pid": (self._proc.pid if running else None),
+                "log_path": str(self.log_path) if self.log_path else None,
+            }
+
+    def start(self) -> dict:
+        with self._lock:
+            if not self.configured():
+                return {"ok": False, "error": f"motion_server binary not found at {self.bin_path!s}"}
+            if self._proc is not None and self._proc.poll() is None:
+                return {"ok": False, "error": "motion_server already running",
+                        "pid": self._proc.pid}
+            log_f = None
+            if self.log_path is not None:
+                self.log_path.parent.mkdir(parents=True, exist_ok=True)
+                log_f = open(self.log_path, "ab", buffering=0)
+            try:
+                self._proc = subprocess.Popen(
+                    [str(self.bin_path)],
+                    cwd=str(self.bin_path.parent),
+                    stdout=log_f or subprocess.DEVNULL,
+                    stderr=subprocess.STDOUT,
+                )
+            except Exception as e:
+                return {"ok": False, "error": f"spawn failed: {e}"}
+            return {"ok": True, "pid": self._proc.pid,
+                    "log_path": str(self.log_path) if self.log_path else None}
+
+    def stop(self, timeout_s: float = 5.0) -> dict:
+        with self._lock:
+            if self._proc is None or self._proc.poll() is not None:
+                self._proc = None
+                return {"ok": True, "info": "not running"}
+            try:
+                self._proc.terminate()
+            except Exception:
+                pass
+            try:
+                self._proc.wait(timeout=timeout_s)
+            except subprocess.TimeoutExpired:
+                try:
+                    self._proc.kill()
+                    self._proc.wait(timeout=2.0)
+                except Exception:
+                    pass
+            self._proc = None
+            return {"ok": True, "info": "stopped"}
+
+    def restart(self) -> dict:
+        stop_result = self.stop()
+        if not stop_result.get("ok", False):
+            return stop_result
+        # motion_server itself takes a beat to release FCI before re-acquiring.
+        time.sleep(0.5)
+        return self.start()
+
+
 class DashboardState:
     def __init__(
         self,
         molmoact_url: str,
-        transport: str,
         rest_step_time_s: float,
         exec_rows: int,
         grasp_commit_grip_frac: float,
         fine_refinement_travel_rad: float,
         max_chunks: int = 30,
+        motion_server: Optional[MotionServerLauncher] = None,
     ):
         self.molmoact_url = molmoact_url
         self.client = DroidClient(molmoact_url)
         self.camera = camera_from_env()
-        self.transport = transport
+        self.transport = "rest"
         self.rest_step_time_s = float(rest_step_time_s)
         self.exec_rows = int(exec_rows)
         self.grasp_commit_grip_frac = float(grasp_commit_grip_frac)
@@ -103,7 +198,8 @@ class DashboardState:
             os.environ.get("FRANKA_BENCH_LOCK_GRIPPER_DOWN", "0")
             not in ("0", "", "false", "False")
         )
-        self.driver = make_driver(transport, step_time_s=self.rest_step_time_s)
+        self.driver = make_driver(self.transport, step_time_s=self.rest_step_time_s)
+        self.motion_server = motion_server or MotionServerLauncher(None)
         self.action_lock = _ActionLock()
         self._driver_lock = threading.Lock()
         self._stop_event = threading.Event()
@@ -121,34 +217,16 @@ class DashboardState:
         with self._progress_lock:
             return dict(self._progress)
 
-    def switch_transport(self, new_transport: str) -> dict:
-        with self._driver_lock:
-            try:
-                new_driver = make_driver(new_transport, step_time_s=self.rest_step_time_s)
-            except Exception as e:
-                return {"ok": False, "error": f"could not build {new_transport!r}: {e}"}
-            try:
-                self.driver.close()
-            except Exception:
-                pass
-            self.driver = new_driver
-            self.transport = new_transport
-            return {"ok": True, "transport": new_transport}
-
-    def step_dt_for_send_chunk(self) -> float:
-        # FCI: 0.1 s substep ramp. REST/MCP: per-row REST move duration.
-        return 0.1 if self.transport == "fci" else self.rest_step_time_s
-
     def do_home(self) -> dict:
         with self._driver_lock:
             self.driver.home()
-        return {"ok": True, "info": f"homed via {self.transport}"}
+        return {"ok": True, "info": "homed via rest"}
 
-    def do_task(self, instruction: str) -> dict:
+    def do_task(self, instruction: str, max_chunks: Optional[int] = None) -> dict:
         """Run a full trial loop: capture → infer → exec, repeated up to
-        self.max_chunks times or until a /api/stop is received. Mirrors
-        droid_runner.run_trial's per-chunk loop, minus the success prompt."""
+        max_chunks (or self.max_chunks if None) or until /api/stop is hit."""
         self._stop_event.clear()
+        cap = int(max_chunks) if max_chunks is not None else self.max_chunks
         t0 = time.perf_counter()
         chunks_done = 0
         last_pred_rows = 0
@@ -156,11 +234,11 @@ class DashboardState:
         total_server_ms = 0.0
         total_rtt_ms = 0.0
         stopped_by = "max_chunks"
-        for chunk_i in range(self.max_chunks):
+        for chunk_i in range(cap):
             if self._stop_event.is_set():
                 stopped_by = "stop_requested"
                 break
-            self._set_progress(chunk_i + 1, self.max_chunks)
+            self._set_progress(chunk_i + 1, cap)
             ext_rgb, wrist_rgb, _ = self.camera.latest_rgb_pair()
             if ext_rgb is None or wrist_rgb is None:
                 self._set_progress(0, 0)
@@ -180,7 +258,7 @@ class DashboardState:
                 with self._driver_lock:
                     self.driver.send_chunk(
                         rows,
-                        step_dt_s=self.step_dt_for_send_chunk(),
+                        step_dt_s=self.rest_step_time_s,
                         lock_gripper_down=self.lock_gripper_down,
                     )
             except CollisionAborted as ca:
@@ -211,10 +289,10 @@ class DashboardState:
         self._set_progress(0, 0)
         return {
             "ok": True,
-            "info": f"trial done via {self.transport} ({stopped_by})",
+            "info": f"trial done via rest ({stopped_by})",
             "stopped_by": stopped_by,
             "chunks_done": chunks_done,
-            "chunks_budget": self.max_chunks,
+            "chunks_budget": cap,
             "wallclock_ms": round((time.perf_counter() - t0) * 1000.0, 1),
             "infer_server_ms_total": round(total_server_ms, 1),
             "infer_rtt_ms_total": round(total_rtt_ms, 1),
@@ -238,6 +316,30 @@ class DashboardState:
             return actions[:max(1, self.exec_rows)]
         return actions
 
+    # ----- runtime knobs (offsets + resolution) -----
+
+    def get_cam_offsets(self) -> tuple[float, float, float]:
+        getter = getattr(self.driver, "get_cam_offsets", None)
+        if getter is None:
+            return 0.0, 0.0, 0.0
+        return getter()
+
+    def set_cam_offsets(self, dx: float, dy: float, dz: float) -> dict:
+        setter = getattr(self.driver, "set_cam_offsets", None)
+        if setter is None:
+            return {"ok": False, "error": "driver does not support runtime cam offsets"}
+        with self._driver_lock:
+            setter(dx, dy, dz)
+        return {"ok": True, "dx": dx, "dy": dy, "dz": dz}
+
+    def set_resolution(self, width: int, height: int, fps: int) -> dict:
+        try:
+            self.camera.restart_with_resolution(width, height, fps)
+        except Exception as e:
+            return {"ok": False, "error": f"restart failed: {e}"}
+        w, h, f = self.camera.resolution()
+        return {"ok": True, "width": w, "height": h, "fps": f}
+
     def close(self) -> None:
         try: self.camera.close()
         except Exception: pass
@@ -257,65 +359,111 @@ _INDEX_HTML = """<!doctype html>
   body { font-family: ui-sans-serif, system-ui, sans-serif; background:#111; color:#eee;
          margin:0; padding:1.5rem; }
   h1 { font-size:1.2rem; margin:0 0 1rem; }
-  .grid { display:grid; grid-template-columns: repeat(2, minmax(300px, 1fr)); gap:1rem; }
+  .cams { display:grid; grid-template-columns: repeat(3, minmax(260px, 1fr)); gap:1rem; }
   .tile { background:#1c1c1c; border:1px solid #2a2a2a; border-radius:8px; padding:0.6rem; }
-  .tile h2 { font-size:0.85rem; margin:0 0 0.4rem; color:#9ad; font-weight:600; }
+  .tile h2 { font-size:0.85rem; margin:0 0 0.4rem; color:#9ad; font-weight:600;
+             display:flex; align-items:center; justify-content:space-between; }
   .tile img, .tile video { width:100%; height:auto; background:#000; border-radius:4px; display:block; }
-  .controls { margin-top:1.2rem; background:#1c1c1c; border:1px solid #2a2a2a; border-radius:8px;
-              padding:1rem; display:grid; gap:0.8rem; }
+  .panel { margin-top:1.2rem; background:#1c1c1c; border:1px solid #2a2a2a; border-radius:8px;
+           padding:1rem; display:grid; gap:0.8rem; }
+  .panel h3 { margin:0; font-size:0.85rem; color:#9ad; font-weight:600;
+              text-transform:uppercase; letter-spacing:0.04em; }
   .row { display:flex; gap:0.6rem; align-items:center; flex-wrap:wrap; }
   label { font-size:0.85rem; color:#9ad; }
-  select, input[type=text], button {
+  select, input, button, textarea {
     background:#222; color:#eee; border:1px solid #333; border-radius:6px;
     padding:0.45rem 0.7rem; font-size:0.9rem;
   }
-  input[type=text] { flex:1 1 320px; min-width:260px; }
+  input[type=number] { width:7em; }
   button { cursor:pointer; }
   button:hover:enabled { background:#2c3e50; }
   button:disabled { opacity:0.55; cursor:default; }
+  button.primary { background:#2c5b3e; border-color:#3d7b54; }
+  button.primary:hover:enabled { background:#377050; }
+  button.danger { background:#5b2c2c; border-color:#7b3d3d; }
+  button.danger:hover:enabled { background:#703737; }
+  #task-instruction { color:#bbb; font-size:0.85rem; min-height:1.2em; font-style:italic; }
   #status { font-size:0.85rem; color:#bbb; white-space:pre-wrap; min-height:1.2em; }
+  #ms-status { font-size:0.85rem; color:#bbb; }
   .ok { color:#7ad07a; }
   .err { color:#e07a7a; }
   .busy { color:#e0c47a; }
-  code { background:#222; padding:0 0.3rem; border-radius:3px; }
+  .sep { width:1px; height:24px; background:#333; margin:0 0.3rem; }
 </style>
 </head>
 <body>
 <h1>MolmoAct2-DROID dashboard</h1>
 
-<div class="grid">
+<div class="cams">
   <div class="tile">
-    <h2>external (tripod) <span id="tag-ext" style="color:#777">[?]</span></h2>
+    <h2><span>external 1</span><span id="tag-ext" style="color:#777">[?]</span></h2>
     <div id="cam-ext"></div>
   </div>
   <div class="tile">
-    <h2>wrist RGB (D457) <span id="tag-wrist" style="color:#777">[?]</span></h2>
+    <h2><span>external 2</span><span id="tag-ext2" style="color:#777">[?]</span></h2>
+    <div id="cam-ext2"></div>
+  </div>
+  <div class="tile">
+    <h2><span>wrist RGB (D45x)</span><span id="tag-wrist" style="color:#777">[?]</span></h2>
     <div id="cam-wrist"></div>
   </div>
 </div>
 
-<div class="controls">
+<div class="panel">
+  <h3>task</h3>
   <div class="row">
-    <label for="transport">transport:</label>
-    <select id="transport">
-      <option value="fci">fci (panda_py)</option>
-      <option value="rest">rest (motion_server)</option>
-    </select>
+    <label for="task-select">task:</label>
+    <select id="task-select"></select>
     <button id="btn-home">home</button>
-    <span id="status">loading...</span>
+    <button id="btn-run" class="primary">run benchmark</button>
+    <button id="btn-stop" class="danger" disabled>stop</button>
   </div>
+  <div id="task-instruction">(select a task)</div>
+</div>
+
+<div class="panel">
+  <h3>camera resolution</h3>
   <div class="row">
-    <label for="task">instruction:</label>
-    <input id="task" type="text" placeholder='e.g. "Put the apple on the plate."' />
-    <button id="btn-run">run trial</button>
-    <button id="btn-stop" disabled>stop</button>
+    <label for="res-select">preset:</label>
+    <select id="res-select"></select>
+    <button id="btn-apply-res">apply</button>
+    <span id="res-current" style="color:#bbb; font-size:0.85rem;"></span>
   </div>
+</div>
+
+<div class="panel">
+  <h3>wrist-cam XYZ offset (metres, base frame)</h3>
+  <div class="row">
+    <label>DX</label><input id="off-dx" type="number" step="0.005" value="0">
+    <label>DY</label><input id="off-dy" type="number" step="0.005" value="0">
+    <label>DZ</label><input id="off-dz" type="number" step="0.005" value="0">
+    <button id="btn-apply-off">apply</button>
+    <span id="off-current" style="color:#bbb; font-size:0.85rem;"></span>
+  </div>
+</div>
+
+<div class="panel">
+  <h3>motion_server (reset-home via restart)</h3>
+  <div class="row">
+    <button id="btn-ms-start">start</button>
+    <button id="btn-ms-restart">restart (re-homes)</button>
+    <button id="btn-ms-stop" class="danger">stop</button>
+    <span id="ms-status">…</span>
+  </div>
+</div>
+
+<div class="panel">
+  <h3>status</h3>
+  <div id="status">loading...</div>
 </div>
 
 <script>
 const $ = s => document.querySelector(s);
 const status = $("#status");
 const WEBRTC_ENABLED = __WEBRTC_ENABLED__;
+const CAMS = ["ext", "ext2", "wrist"];
+const STREAM_PATH = { ext: "/stream/ext", ext2: "/stream/ext2", wrist: "/stream/wrist_rgb" };
+const SLOT = { ext: ["cam-ext", "tag-ext"], ext2: ["cam-ext2", "tag-ext2"], wrist: ["cam-wrist", "tag-wrist"] };
 
 function mountMjpeg(slotId, tagId, src) {
   const el = document.getElementById(slotId);
@@ -330,11 +478,7 @@ async function mountWebRTC(slotId, tagId, cam) {
   const video = el.querySelector("video");
   const pc = new RTCPeerConnection();
   pc.addTransceiver("video", { direction: "recvonly" });
-  pc.ontrack = (ev) => {
-    if (ev.track.kind === "video") {
-      video.srcObject = ev.streams[0];
-    }
-  };
+  pc.ontrack = (ev) => { if (ev.track.kind === "video") video.srcObject = ev.streams[0]; };
   const offer = await pc.createOffer();
   await pc.setLocalDescription(offer);
   const r = await fetch(`/offer/${cam}`, {
@@ -349,28 +493,21 @@ async function mountWebRTC(slotId, tagId, cam) {
   if (tag) { tag.textContent = "[webrtc]"; tag.style.color = "#7ad07a"; }
 }
 
-(async () => {
-  const mjpegSrc = { ext: "/stream/ext", wrist: "/stream/wrist_rgb" };
-  const slot = { ext: ["cam-ext", "tag-ext"], wrist: ["cam-wrist", "tag-wrist"] };
-  for (const cam of ["ext", "wrist"]) {
-    const [slotId, tagId] = slot[cam];
+async function mountCameras() {
+  for (const cam of CAMS) {
+    const [slotId, tagId] = SLOT[cam];
     if (WEBRTC_ENABLED) {
-      try {
-        await mountWebRTC(slotId, tagId, cam);
-        continue;
-      } catch (e) {
-        console.warn(`webrtc ${cam} failed, falling back to mjpeg:`, e);
-      }
+      try { await mountWebRTC(slotId, tagId, cam); continue; }
+      catch (e) { console.warn(`webrtc ${cam} failed, falling back to mjpeg:`, e); }
     }
-    mountMjpeg(slotId, tagId, mjpegSrc[cam]);
+    mountMjpeg(slotId, tagId, STREAM_PATH[cam] + `?t=${Date.now()}`);
   }
-})();
+}
 
 async function refreshStatus() {
   try {
     const r = await fetch("/api/status");
     const j = await r.json();
-    $("#transport").value = j.transport;
     const cls = j.busy ? "busy" : (j.last && j.last.ok === false ? "err" : "ok");
     const prog = j.progress || {chunk: 0, max: 0};
     const progStr = prog.max > 0 ? ` (chunk ${prog.chunk}/${prog.max})` : "";
@@ -380,57 +517,152 @@ async function refreshStatus() {
     status.textContent = `${what}\\nlast: ${last}`;
     $("#btn-home").disabled = j.busy;
     $("#btn-run").disabled = j.busy;
-    // Stop is only meaningful while a trial is running.
     $("#btn-stop").disabled = !j.busy;
+    if (j.resolution) {
+      $("#res-current").textContent = `current: ${j.resolution.width}x${j.resolution.height}@${j.resolution.fps}`;
+    }
+    if (j.cam_offsets) {
+      const o = j.cam_offsets;
+      $("#off-current").textContent = `current: DX=${o.dx.toFixed(3)} DY=${o.dy.toFixed(3)} DZ=${o.dz.toFixed(3)}`;
+    }
+    if (j.motion_server) {
+      const ms = j.motion_server;
+      const lbl = ms.configured
+        ? (ms.running ? `running (pid ${ms.pid})` : "stopped")
+        : "not configured";
+      $("#ms-status").textContent = `motion_server: ${lbl}`;
+      $("#ms-status").className = ms.running ? "ok" : (ms.configured ? "" : "err");
+      $("#btn-ms-start").disabled = !ms.configured || ms.running;
+      $("#btn-ms-restart").disabled = !ms.configured;
+      $("#btn-ms-stop").disabled = !ms.running;
+    }
   } catch (e) {
     status.className = "err";
     status.textContent = "status error: " + e;
   }
 }
 
+async function loadTasks() {
+  const r = await fetch("/api/tasks");
+  const j = await r.json();
+  const sel = $("#task-select");
+  sel.innerHTML = "";
+  for (const t of j.tasks) {
+    const opt = document.createElement("option");
+    opt.value = t.task_id;
+    opt.textContent = t.task_id;
+    opt.dataset.instruction = t.instruction;
+    opt.dataset.maxChunks = t.max_chunks;
+    sel.appendChild(opt);
+  }
+  if (j.tasks.length) updateInstruction();
+  sel.addEventListener("change", updateInstruction);
+}
+
+function updateInstruction() {
+  const sel = $("#task-select");
+  const opt = sel.options[sel.selectedIndex];
+  $("#task-instruction").textContent = opt ? `instruction: "${opt.dataset.instruction}"` : "";
+}
+
+async function loadResolutions() {
+  const r = await fetch("/api/resolutions");
+  const j = await r.json();
+  const sel = $("#res-select");
+  sel.innerHTML = "";
+  for (const p of j.presets) {
+    const opt = document.createElement("option");
+    opt.value = `${p.width}x${p.height}x${p.fps}`;
+    opt.textContent = `${p.width}x${p.height}@${p.fps}`;
+    sel.appendChild(opt);
+  }
+  const cur = `${j.current.width}x${j.current.height}x${j.current.fps}`;
+  for (const o of sel.options) if (o.value === cur) o.selected = true;
+}
+
+async function loadOffsets() {
+  const r = await fetch("/api/offsets");
+  const j = await r.json();
+  $("#off-dx").value = j.dx;
+  $("#off-dy").value = j.dy;
+  $("#off-dz").value = j.dz;
+}
+
 $("#btn-home").addEventListener("click", async () => {
   $("#btn-home").disabled = true;
   const r = await fetch("/api/home", { method: "POST" });
-  const j = await r.json();
-  status.textContent = JSON.stringify(j);
+  status.textContent = JSON.stringify(await r.json());
   await refreshStatus();
 });
 
 $("#btn-run").addEventListener("click", async () => {
-  const instruction = $("#task").value.trim();
-  if (!instruction) { status.textContent = "type an instruction first"; return; }
+  const sel = $("#task-select");
+  const opt = sel.options[sel.selectedIndex];
+  if (!opt) { status.textContent = "no task selected"; return; }
   $("#btn-run").disabled = true;
   const r = await fetch("/api/task", {
     method: "POST",
     headers: {"Content-Type": "application/json"},
-    body: JSON.stringify({ instruction })
+    body: JSON.stringify({
+      task_id: opt.value,
+      instruction: opt.dataset.instruction,
+      max_chunks: Number(opt.dataset.maxChunks),
+    }),
   });
-  const j = await r.json();
-  status.textContent = JSON.stringify(j);
+  status.textContent = JSON.stringify(await r.json());
   await refreshStatus();
 });
 
 $("#btn-stop").addEventListener("click", async () => {
   $("#btn-stop").disabled = true;
   await fetch("/api/stop", { method: "POST" });
-  // The trial loop checks the flag between chunks, so the next chunk
-  // boundary will exit. Status refresh re-enables the button if needed.
   await refreshStatus();
 });
 
-$("#transport").addEventListener("change", async (ev) => {
-  const r = await fetch("/api/transport", {
+$("#btn-apply-res").addEventListener("click", async () => {
+  const [w, h, f] = $("#res-select").value.split("x").map(Number);
+  $("#btn-apply-res").disabled = true;
+  const r = await fetch("/api/resolution", {
     method: "POST",
     headers: {"Content-Type": "application/json"},
-    body: JSON.stringify({ transport: ev.target.value })
+    body: JSON.stringify({ width: w, height: h, fps: f }),
   });
-  const j = await r.json();
-  status.textContent = JSON.stringify(j);
+  status.textContent = JSON.stringify(await r.json());
+  $("#btn-apply-res").disabled = false;
+  await mountCameras();
   await refreshStatus();
 });
 
-setInterval(refreshStatus, 1500);
-refreshStatus();
+$("#btn-apply-off").addEventListener("click", async () => {
+  const dx = Number($("#off-dx").value);
+  const dy = Number($("#off-dy").value);
+  const dz = Number($("#off-dz").value);
+  const r = await fetch("/api/offsets", {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({ dx, dy, dz }),
+  });
+  status.textContent = JSON.stringify(await r.json());
+  await refreshStatus();
+});
+
+async function msPost(action) {
+  const r = await fetch(`/api/motion_server/${action}`, { method: "POST" });
+  status.textContent = JSON.stringify(await r.json());
+  await refreshStatus();
+}
+$("#btn-ms-start").addEventListener("click", () => msPost("start"));
+$("#btn-ms-restart").addEventListener("click", () => msPost("restart"));
+$("#btn-ms-stop").addEventListener("click", () => msPost("stop"));
+
+(async () => {
+  await mountCameras();
+  await loadTasks();
+  await loadResolutions();
+  await loadOffsets();
+  setInterval(refreshStatus, 1500);
+  refreshStatus();
+})();
 </script>
 </body>
 </html>
@@ -439,8 +671,7 @@ refreshStatus();
 
 # ---------- Flask app ----------
 
-def make_app(state: DashboardState, fps: float = 30.0,
-             webrtc=None) -> Flask:
+def make_app(state: DashboardState, fps: float = 30.0, webrtc=None) -> Flask:
     app = Flask(__name__)
     period = 1.0 / max(fps, 1.0)
     app.config["WEBRTC_ENABLED"] = webrtc is not None
@@ -463,22 +694,28 @@ def make_app(state: DashboardState, fps: float = 30.0,
     def stream_ext():
         return _stream(lambda: state.camera.latest_jpegs()[0])
 
+    @app.route("/stream/ext2")
+    def stream_ext2():
+        return _stream(lambda: state.camera.latest_jpegs()[1])
+
     @app.route("/stream/wrist_rgb")
     def stream_wrist_rgb():
-        return _stream(lambda: state.camera.latest_jpegs()[1])
+        return _stream(lambda: state.camera.latest_jpegs()[2])
 
     @app.route("/offer/<cam>", methods=["POST"])
     def offer(cam: str):
         if webrtc is None:
             return jsonify({"ok": False, "error": "webrtc disabled on server"}), 503
-        if cam not in ("ext", "wrist"):
+        if cam not in ("ext", "ext2", "wrist"):
             return jsonify({"ok": False, "error": f"unknown cam {cam!r}"}), 400
         body = request.get_json(silent=True) or {}
         sdp = body.get("sdp"); type_ = body.get("type")
         if not sdp or not type_:
             return jsonify({"ok": False, "error": "sdp and type required"}), 400
-        idx = 0 if cam == "ext" else 1
-        getter = lambda: state.camera.latest_rgb_pair()[idx]
+        if cam == "ext2" and not state.camera.has_second_external():
+            return jsonify({"ok": False, "error": "no 2nd external configured"}), 400
+        idx = {"ext": 0, "ext2": 1, "wrist": 2}[cam]
+        getter = lambda: state.camera.latest_rgbs()[idx]
         try:
             ans = webrtc.handle_offer(sdp, type_, getter)
         except Exception as e:
@@ -489,10 +726,63 @@ def make_app(state: DashboardState, fps: float = 30.0,
     @app.route("/api/status")
     def api_status():
         snap = state.action_lock.snapshot()
-        snap["transport"] = state.transport
+        snap["transport"] = "rest"
         snap["molmoact_url"] = state.molmoact_url
         snap["progress"] = state.progress()
+        w, h, f = state.camera.resolution()
+        snap["resolution"] = {"width": w, "height": h, "fps": f}
+        dx, dy, dz = state.get_cam_offsets()
+        snap["cam_offsets"] = {"dx": dx, "dy": dy, "dz": dz}
+        snap["motion_server"] = state.motion_server.status()
         return jsonify(snap)
+
+    @app.route("/api/tasks")
+    def api_tasks():
+        out = []
+        for t in droid_tasks.all_tasks():
+            out.append({
+                "task_id": t.task_id,
+                "instruction": t.instruction,
+                "paper_success_rate": t.paper_success_rate,
+                "max_chunks": t.max_chunks,
+                "trials": t.trials,
+            })
+        return jsonify({"tasks": out})
+
+    @app.route("/api/resolutions")
+    def api_resolutions():
+        w, h, f = state.camera.resolution()
+        return jsonify({
+            "presets": [{"width": p[0], "height": p[1], "fps": p[2]} for p in _RESOLUTIONS],
+            "current": {"width": w, "height": h, "fps": f},
+        })
+
+    @app.route("/api/resolution", methods=["POST"])
+    def api_resolution():
+        body = request.get_json(silent=True) or {}
+        try:
+            width = int(body["width"]); height = int(body["height"]); fps = int(body["fps"])
+        except (KeyError, TypeError, ValueError):
+            return jsonify({"ok": False, "error": "width, height, fps required (ints)"}), 400
+        if not state.action_lock.acquire("resolution"):
+            return jsonify({"ok": False, "error": "another action is in progress"}), 409
+        try:
+            result = state.set_resolution(width, height, fps)
+        finally:
+            state.action_lock.release(result)
+        return jsonify(result)
+
+    @app.route("/api/offsets", methods=["GET", "POST"])
+    def api_offsets():
+        if request.method == "GET":
+            dx, dy, dz = state.get_cam_offsets()
+            return jsonify({"dx": dx, "dy": dy, "dz": dz})
+        body = request.get_json(silent=True) or {}
+        try:
+            dx = float(body["dx"]); dy = float(body["dy"]); dz = float(body["dz"])
+        except (KeyError, TypeError, ValueError):
+            return jsonify({"ok": False, "error": "dx, dy, dz required (floats)"}), 400
+        return jsonify(state.set_cam_offsets(dx, dy, dz))
 
     @app.route("/api/stop", methods=["POST"])
     def api_stop():
@@ -519,36 +809,49 @@ def make_app(state: DashboardState, fps: float = 30.0,
     def api_task():
         body = request.get_json(silent=True) or {}
         instruction = (body.get("instruction") or "").strip()
+        task_id = body.get("task_id")
+        max_chunks = body.get("max_chunks")
         if not instruction:
             return jsonify({"ok": False, "error": "instruction is required"}), 400
-        if not state.action_lock.acquire("task"):
+        if not state.action_lock.acquire(f"task:{task_id or 'custom'}"):
             return jsonify({"ok": False, "error": "another action is in progress"}), 409
         try:
             try:
-                result = state.do_task(instruction)
+                result = state.do_task(instruction, max_chunks=max_chunks)
                 result["instruction"] = instruction
+                if task_id:
+                    result["task_id"] = task_id
             except Exception as e:
                 result = {"ok": False, "error": f"task failed: {e}", "instruction": instruction}
         finally:
             state.action_lock.release(result)
         return jsonify(result)
 
-    @app.route("/api/transport", methods=["POST"])
-    def api_transport():
-        body = request.get_json(silent=True) or {}
-        new = (body.get("transport") or "").strip()
-        if new not in ("fci", "rest"):
-            return jsonify({"ok": False, "error": "transport must be fci/rest "
-                                                 "(mcp is no longer dashboard-supported)"}), 400
-        if not state.action_lock.acquire(f"switch->{new}"):
-            return jsonify({"ok": False, "error": "another action is in progress"}), 409
-        try:
-            result = state.switch_transport(new)
-        finally:
-            state.action_lock.release(result)
-        return jsonify(result)
+    @app.route("/api/motion_server/<action>", methods=["POST"])
+    def api_motion_server(action: str):
+        if action == "start":
+            return jsonify(state.motion_server.start())
+        if action == "stop":
+            return jsonify(state.motion_server.stop())
+        if action == "restart":
+            return jsonify(state.motion_server.restart())
+        if action == "status":
+            return jsonify(state.motion_server.status())
+        return jsonify({"ok": False, "error": f"unknown action {action!r}"}), 400
 
     return app
+
+
+def _resolve_motion_server_bin(arg: Optional[str]) -> Optional[Path]:
+    if arg:
+        return Path(arg).expanduser().resolve()
+    # Best-effort default: <repo-root>/franka/cpp/build/motion_server
+    here = Path(__file__).resolve()
+    for p in here.parents:
+        candidate = p / "franka" / "cpp" / "build" / "motion_server"
+        if candidate.exists():
+            return candidate
+    return None
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -556,51 +859,59 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--port", type=int, default=8080)
     ap.add_argument("--host", default="0.0.0.0")
     ap.add_argument("--molmoact-url", default="http://localhost:8000")
-    ap.add_argument("--transport", choices=["fci", "rest"], default=None,
-                    help="override env-var autodetect. mcp is no longer "
-                         "supported on the dashboard; use rest instead.")
     ap.add_argument("--rest-step-time-s", type=float, default=2.5)
     ap.add_argument("--exec-rows", type=int, default=3)
     ap.add_argument("--grasp-commit-grip-frac", type=float, default=0.5)
     ap.add_argument("--fine-refinement-travel-rad", type=float, default=0.2)
     ap.add_argument("--max-chunks", type=int, default=30,
-                    help="safety cap on action chunks per dashboard trial. "
-                         "Matches the CLI runner's --max-chunks default (also "
-                         "the per-task max_chunks in droid_tasks.py).")
+                    help="safety cap on action chunks per dashboard trial "
+                         "(used when the selected task doesn't carry its own).")
     ap.add_argument("--mjpeg-fps", type=float, default=30.0)
     ap.add_argument("--no-webrtc", action="store_true",
-                    help="disable WebRTC streaming and force MJPEG even if "
-                         "aiortc is installed (useful when troubleshooting).")
+                    help="disable WebRTC streaming and force MJPEG.")
+    ap.add_argument("--motion-server-bin", default=None,
+                    help="path to the motion_server binary. Defaults to "
+                         "<repo>/franka/cpp/build/motion_server if found.")
+    ap.add_argument("--motion-server-log", default=None,
+                    help="path to write motion_server stdout/stderr.")
     args = ap.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO,
                         format="%(asctime)s %(levelname)s %(name)s %(message)s")
 
-    transport = args.transport or autodetect_transport()
-    if transport == "mcp":
-        # autodetect picked mcp from FRANKA_MCP_URL in the env, but the
-        # dashboard no longer supports the MCP transport. Surface a clear
-        # error rather than letting it fail later in the dropdown / driver.
-        log.error("MCP transport is no longer supported on the dashboard. "
-                  "Either unset FRANKA_MCP_URL or pass --transport rest/fci. "
-                  "(The CLI runner still supports mcp.)")
+    # FCI used to be valid here; the dashboard no longer supports it. The CLI
+    # runner still does. Reject early so a stale FRANKA_HOST in the env can't
+    # silently flip us off the supported REST path.
+    if not os.environ.get("FRANKA_REST_HOST"):
+        log.error(
+            "FRANKA_REST_HOST is not set. The dashboard only supports the REST "
+            "transport (motion_server). Export FRANKA_REST_HOST=<motion_server IP> "
+            "and re-run. (FCI/MCP are no longer dashboard-supported; use the CLI runner.)"
+        )
         return 2
-    log.info("transport: %s", transport)
+    log.info("transport: rest")
+
+    bin_path = _resolve_motion_server_bin(args.motion_server_bin)
+    log_path = Path(args.motion_server_log).expanduser().resolve() if args.motion_server_log else None
+    motion_server = MotionServerLauncher(bin_path, log_path=log_path)
+    if motion_server.configured():
+        log.info("motion_server binary: %s", bin_path)
+    else:
+        log.warning("motion_server binary not found; the UI controls will be disabled.")
 
     state = DashboardState(
         molmoact_url=args.molmoact_url,
-        transport=transport,
         rest_step_time_s=args.rest_step_time_s,
         exec_rows=args.exec_rows,
         grasp_commit_grip_frac=args.grasp_commit_grip_frac,
         fine_refinement_travel_rad=args.fine_refinement_travel_rad,
         max_chunks=args.max_chunks,
+        motion_server=motion_server,
     )
 
     webrtc = None if args.no_webrtc else _build_webrtc_broadcaster()
     if webrtc is not None:
-        log.info("WebRTC enabled (pip install aiortc av if you want to disable, "
-                 "or use --no-webrtc)")
+        log.info("WebRTC enabled")
     else:
         log.info("WebRTC disabled; using MJPEG")
 
@@ -611,6 +922,8 @@ def main(argv: list[str] | None = None) -> int:
         if webrtc is not None:
             try: webrtc.close()
             except Exception: pass
+        try: motion_server.stop()
+        except Exception: pass
         state.close()
     return 0
 
