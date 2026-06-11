@@ -42,7 +42,6 @@ from benchmarks.benchmark import droid_tasks
 from benchmarks.benchmark.droid_runner import (
     _enforce_hold_until_target,
     _enforce_hold_until_transported,
-    _suppress_opens_while_empty,
     _is_holding,
 )
 from benchmarks.benchmark.molmoact_droid_client import DroidClient
@@ -242,7 +241,8 @@ class DashboardState:
 
     def do_task(self, instruction: str, max_chunks: Optional[int] = None,
                 task_id: Optional[str] = None,
-                hold_min_dist_m: float = 0.08) -> dict:
+                hold_min_dist_m: float = 0.08,
+                grasp_retry_limit: int = 3) -> dict:
         """Run a full trial loop: capture → infer → exec, repeated up to
         max_chunks (or self.max_chunks if None) or until /api/stop is hit.
 
@@ -267,8 +267,8 @@ class DashboardState:
         total_server_ms = 0.0
         total_rtt_ms = 0.0
         total_suppressed = 0
-        total_empty_suppressed = 0
         grasp_fail_count = 0
+        grasp_retries_used = 0
         ever_held = False
         prev_last_grip_close: Optional[bool] = None
         grasp_xy: Optional[tuple[float, float]] = None
@@ -286,16 +286,45 @@ class DashboardState:
             with self._driver_lock:
                 state8 = self.driver.state_vec8()
             current_width = float(state8[7])
-            # Grasp-fail detection: previous chunk ended with the policy
-            # commanding close, but the jaws are now fully closed-empty.
+            # Grasp-fail detection + autonomous retry: previous chunk ended
+            # with the policy commanding close, but the jaws are now fully
+            # closed-empty -- we missed the object.
             if prev_last_grip_close is True and current_width < 0.005:
                 grasp_fail_count += 1
                 log.warning(
-                    "grasp_fail: width=%.4f after commanded close (chunk %d, task=%s)",
+                    "grasp_fail: width=%.4f after commanded close "
+                    "(chunk %d, task=%s)",
                     current_width, chunk_i + 1, task_id or "custom",
                 )
+                if grasp_retries_used < grasp_retry_limit:
+                    grasp_retries_used += 1
+                    log.info(
+                        "autonomous retry %d/%d: force-opening gripper so the "
+                        "policy can re-plan a fresh approach",
+                        grasp_retries_used, grasp_retry_limit,
+                    )
+                    try:
+                        with self._driver_lock:
+                            self.driver.force_open_gripper()
+                    except Exception as e:
+                        log.warning("force_open_gripper failed: %s", e)
+                    # Reset gripper-command memory and skip this chunk so the
+                    # next iteration re-captures cameras + state with open
+                    # jaws and asks the policy for a fresh trajectory.
+                    prev_last_grip_close = False
+                    continue
+                else:
+                    log.error(
+                        "grasp_fail: retry budget %d exhausted, aborting trial",
+                        grasp_retry_limit,
+                    )
+                    stopped_by = "grasp_retry_budget_exhausted"
+                    break
             if _is_holding(current_width):
                 ever_held = True
+                # Successful grasp resets the retry budget so a later object
+                # slip + re-grasp gets its own allowance.
+                grasp_retries_used = 0
             pred = self.client.act(
                 external_cam=ext_rgb,
                 wrist_cam=wrist_rgb,
@@ -334,19 +363,6 @@ class DashboardState:
                         n_supp, len(rows), task_id or "custom", chunk_i + 1,
                         hold_min_dist_m,
                     )
-                # Hold-empty guard: if we've never observed a successful
-                # holding state this trial, suppress any open commands while
-                # the jaws are closed-empty. The release event makes no
-                # sense if we haven't grasped anything yet.
-                if not ever_held:
-                    n_empty = _suppress_opens_while_empty(rows, current_width)
-                    if n_empty > 0:
-                        total_empty_suppressed += n_empty
-                        log.warning(
-                            "hold-empty: kept gripper closed on %d/%d row(s) "
-                            "(%s chunk %d) — no successful grasp observed yet",
-                            n_empty, len(rows), task_id or "custom", chunk_i + 1,
-                        )
             try:
                 with self._driver_lock:
                     self.driver.send_chunk(
@@ -416,8 +432,9 @@ class DashboardState:
             "hold_until_target": target_zone is not None,
             "hold_min_dist_m": hold_min_dist_m if target_zone is None else None,
             "gripper_open_suppressed": total_suppressed,
-            "gripper_open_suppressed_empty": total_empty_suppressed,
             "grasp_fail_count": grasp_fail_count,
+            "grasp_retries_used": grasp_retries_used,
+            "grasp_retry_limit": grasp_retry_limit,
             "ever_held": ever_held,
             "homed_after_stop": homed_after_stop,
             "home_error": home_error,
@@ -608,6 +625,19 @@ _INDEX_HTML = """<!doctype html>
     <span style="color:#bbb; font-size:0.8rem;">
       0 = disable. Suppresses gripper-open commands within this radius of
       the pickup point. Ignored when the task has a fixed target_zone_xy.
+    </span>
+  </div>
+</div>
+
+<div class="panel">
+  <h3>autonomous grasp retry</h3>
+  <div class="row">
+    <label for="retry-limit">retry budget:</label>
+    <input id="retry-limit" type="number" step="1" min="0" value="3">
+    <span style="color:#bbb; font-size:0.8rem;">
+      0 = no retry (one shot). On a missed grasp the dashboard force-opens
+      the jaws and re-prompts MolmoAct2 with fresh cameras so it can
+      re-approach from a clean state. Budget resets on each successful grasp.
     </span>
   </div>
 </div>
@@ -849,6 +879,7 @@ $("#btn-run").addEventListener("click", async () => {
       instruction: opt.dataset.instruction,
       max_chunks: Number(opt.dataset.maxChunks),
       hold_min_dist_m: Number($("#hold-min-dist").value),
+      grasp_retry_limit: Number($("#retry-limit").value),
     }),
   });
   status.textContent = JSON.stringify(await r.json());
@@ -1063,6 +1094,10 @@ def make_app(state: DashboardState, fps: float = 30.0, webrtc=None) -> Flask:
             hold_min_dist_m = float(body.get("hold_min_dist_m", 0.08))
         except (TypeError, ValueError):
             hold_min_dist_m = 0.08
+        try:
+            grasp_retry_limit = int(body.get("grasp_retry_limit", 3))
+        except (TypeError, ValueError):
+            grasp_retry_limit = 3
         if not instruction:
             return jsonify({"ok": False, "error": "instruction is required"}), 400
         if not state.action_lock.acquire(f"task:{task_id or 'custom'}"):
@@ -1071,7 +1106,8 @@ def make_app(state: DashboardState, fps: float = 30.0, webrtc=None) -> Flask:
             try:
                 result = state.do_task(instruction, max_chunks=max_chunks,
                                        task_id=task_id,
-                                       hold_min_dist_m=hold_min_dist_m)
+                                       hold_min_dist_m=hold_min_dist_m,
+                                       grasp_retry_limit=grasp_retry_limit)
                 result["instruction"] = instruction
                 if task_id:
                     result["task_id"] = task_id

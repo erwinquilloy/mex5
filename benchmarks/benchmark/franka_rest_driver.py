@@ -415,6 +415,17 @@ class FrankaRestDriver:
             self._post("openGripper", [_GRIPPER_MAX_M])
         self._last_grip = close
 
+    def force_open_gripper(self) -> None:
+        """Open the jaws unconditionally, bypassing the _last_grip cache.
+
+        Used by autonomous retry after a failed grasp: motion_server thinks the
+        gripper is closed (because the last command was closeGripper) but the
+        jaws are physically closed-empty. We want the next inference cycle to
+        see open jaws so the policy re-plans a fresh approach, even if our
+        local cache says we're "already closed"."""
+        self._post("openGripper", [_GRIPPER_MAX_M])
+        self._last_grip = False
+
     def send_chunk(
         self,
         actions: np.ndarray,
