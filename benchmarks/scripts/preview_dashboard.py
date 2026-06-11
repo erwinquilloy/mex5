@@ -20,7 +20,7 @@ import numpy as np
 from flask import Flask, Response, jsonify
 
 from benchmarks.benchmark import droid_tasks
-from benchmarks.scripts.serve_dashboard import _INDEX_HTML, _RESOLUTIONS
+from benchmarks.scripts.serve_dashboard import _INDEX_HTML
 
 log = logging.getLogger("dashboard-preview")
 
@@ -76,7 +76,6 @@ def make_app() -> Flask:
             "last": {"ok": True, "info": "preview mode (no hardware)"},
             "transport": "rest",
             "progress": {"chunk": 0, "max": 0},
-            "resolution": {"width": 640, "height": 480, "fps": 30},
             "cam_offsets": {"dx": 0.0, "dy": 0.0, "dz": 0.0},
             "motion_server": {
                 "configured": False, "bin_path": None,
@@ -93,13 +92,6 @@ def make_app() -> Flask:
             for t in droid_tasks.all_tasks()
         ]})
 
-    @app.route("/api/resolutions")
-    def api_resolutions():
-        return jsonify({
-            "presets": [{"width": p[0], "height": p[1], "fps": p[2]} for p in _RESOLUTIONS],
-            "current": {"width": 640, "height": 480, "fps": 30},
-        })
-
     @app.route("/api/offsets", methods=["GET", "POST"])
     def api_offsets():
         return jsonify({"ok": True, "dx": 0.0, "dy": 0.0, "dz": 0.0,
@@ -109,7 +101,6 @@ def make_app() -> Flask:
     def api_preferences():
         return jsonify({
             "cam_offsets": {"dx": 0.0, "dy": 0.0, "dz": 0.0},
-            "resolution": {"width": 640, "height": 480, "fps": 30},
             "hold_min_dist_m": 0.08,
             "grasp_retry_limit": 3,
             "settings_path": "(preview mode — no file)",
@@ -121,7 +112,6 @@ def make_app() -> Flask:
     app.add_url_rule("/api/home", view_func=_preview, methods=["POST"])
     app.add_url_rule("/api/task", view_func=_preview, methods=["POST"])
     app.add_url_rule("/api/stop", view_func=_preview, methods=["POST"])
-    app.add_url_rule("/api/resolution", view_func=_preview, methods=["POST"])
     app.add_url_rule("/api/motion_server/<action>", view_func=_preview, methods=["POST"])
     return app
 

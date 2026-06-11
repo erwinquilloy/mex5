@@ -1,8 +1,8 @@
 """Interactive web dashboard for the MolmoAct2-DROID rig.
 
 Shows three live camera streams (2 external + 1 wrist RealSense RGB), a
-DROID task dropdown, runtime controls for camera resolution and wrist-cam
-XYZ offsets, a Home button, a Run Benchmark button, and a motion_server
+DROID task dropdown, runtime controls for wrist-cam XYZ offsets, a Home
+button, a Run Benchmark button, and a motion_server
 launcher (its initialize() runs goHome, so restarting it doubles as an arm
 reset).
 
@@ -51,17 +51,6 @@ from benchmarks.benchmark.transport import make_driver
 log = logging.getLogger("dashboard")
 
 
-# Resolution presets exposed via the UI dropdown. All are color modes that
-# D45x RealSense + typical USB webcams accept at 30 fps.
-_RESOLUTIONS = [
-    (320, 240, 30),
-    (424, 240, 30),
-    (640, 480, 30),
-    (848, 480, 30),
-    (1280, 720, 30),
-]
-
-
 _DEFAULT_SETTINGS_PATH = Path.home() / ".cache" / "mex5_dashboard_settings.json"
 
 
@@ -72,7 +61,6 @@ class DashboardSettings:
     dict; missing keys mean "use the constructor default". The fields we
     persist are:
         - cam_offsets: {dx, dy, dz}
-        - resolution: {width, height, fps}
         - hold_min_dist_m: float
         - grasp_retry_limit: int
     """
@@ -515,7 +503,7 @@ class DashboardState:
         # the larger inter-waypoint jumps. 0 disables (run every row).
         return _subsample_rows(actions, self.approach_max_rows)
 
-    # ----- runtime knobs (offsets + resolution) -----
+    # ----- runtime knobs (offsets) -----
 
     def get_cam_offsets(self) -> tuple[float, float, float]:
         getter = getattr(self.driver, "get_cam_offsets", None)
@@ -555,19 +543,8 @@ class DashboardState:
             label = "closed"
         return {"state": label, "width_m": round(w, 4)}
 
-    def set_resolution(self, width: int, height: int, fps: int,
-                       persist: bool = True) -> dict:
-        try:
-            self.camera.restart_with_resolution(width, height, fps)
-        except Exception as e:
-            return {"ok": False, "error": f"restart failed: {e}"}
-        w, h, f = self.camera.resolution()
-        if persist:
-            self.settings.update(resolution={"width": w, "height": h, "fps": f})
-        return {"ok": True, "width": w, "height": h, "fps": f}
-
     def apply_persisted_settings(self) -> None:
-        """Reapply saved cam offsets + resolution on startup."""
+        """Reapply saved cam offsets on startup."""
         offsets = self.settings.get("cam_offsets")
         if offsets:
             try:
@@ -578,24 +555,12 @@ class DashboardState:
                 log.info("loaded persisted cam offsets: %s", offsets)
             except Exception as e:
                 log.warning("could not apply persisted cam offsets: %s", e)
-        res = self.settings.get("resolution")
-        if res:
-            try:
-                self.set_resolution(
-                    int(res["width"]), int(res["height"]), int(res["fps"]),
-                    persist=False,
-                )
-                log.info("loaded persisted resolution: %s", res)
-            except Exception as e:
-                log.warning("could not apply persisted resolution: %s", e)
 
     def preferences(self) -> dict:
         """Snapshot for the UI's loadPreferences()."""
         dx, dy, dz = self.get_cam_offsets()
-        w, h, f = self.camera.resolution()
         return {
             "cam_offsets": {"dx": dx, "dy": dy, "dz": dz},
-            "resolution": {"width": w, "height": h, "fps": f},
             "hold_min_dist_m": float(self.settings.get("hold_min_dist_m", 0.08)),
             "grasp_retry_limit": int(self.settings.get("grasp_retry_limit", 3)),
             "settings_path": str(self.settings.path),
@@ -697,16 +662,6 @@ _INDEX_HTML = """<!doctype html>
     <button id="btn-stop" class="danger" disabled>stop</button>
   </div>
   <div id="task-instruction">(select a task)</div>
-</div>
-
-<div class="panel">
-  <h3>camera resolution</h3>
-  <div class="row">
-    <label for="res-select">preset:</label>
-    <select id="res-select"></select>
-    <button id="btn-apply-res">apply</button>
-    <span id="res-current" style="color:#bbb; font-size:0.85rem;"></span>
-  </div>
 </div>
 
 <div class="panel">
@@ -873,9 +828,6 @@ async function refreshStatus() {
     $("#btn-home").disabled = j.busy;
     $("#btn-run").disabled = j.busy;
     $("#btn-stop").disabled = !j.busy;
-    if (j.resolution) {
-      $("#res-current").textContent = `current: ${j.resolution.width}x${j.resolution.height}@${j.resolution.fps}`;
-    }
     if (j.cam_offsets) {
       const o = j.cam_offsets;
       $("#off-current").textContent = `current: DX=${o.dx.toFixed(3)} DY=${o.dy.toFixed(3)} DZ=${o.dz.toFixed(3)}`;
@@ -928,21 +880,6 @@ function updateInstruction() {
   $("#task-instruction").textContent = opt ? `instruction: "${opt.dataset.instruction}"` : "";
 }
 
-async function loadResolutions() {
-  const r = await fetch("/api/resolutions");
-  const j = await r.json();
-  const sel = $("#res-select");
-  sel.innerHTML = "";
-  for (const p of j.presets) {
-    const opt = document.createElement("option");
-    opt.value = `${p.width}x${p.height}x${p.fps}`;
-    opt.textContent = `${p.width}x${p.height}@${p.fps}`;
-    sel.appendChild(opt);
-  }
-  const cur = `${j.current.width}x${j.current.height}x${j.current.fps}`;
-  for (const o of sel.options) if (o.value === cur) o.selected = true;
-}
-
 async function loadOffsets() {
   const r = await fetch("/api/offsets");
   const j = await r.json();
@@ -952,9 +889,9 @@ async function loadOffsets() {
 }
 
 async function loadPreferences() {
-  // Persisted trial knobs (hold-min-dist + retry budget). The offset and
-  // resolution panels already pull live driver/camera state, so we only
-  // need to repopulate the inputs that have no other source of truth.
+  // Persisted trial knobs (hold-min-dist + retry budget). The offset
+  // panel already pulls live driver state, so we only need to repopulate
+  // the inputs that have no other source of truth.
   const r = await fetch("/api/preferences");
   if (!r.ok) return;
   const j = await r.json();
@@ -1002,20 +939,6 @@ $("#btn-stop").addEventListener("click", async () => {
   await refreshStatus();
 });
 
-$("#btn-apply-res").addEventListener("click", async () => {
-  const [w, h, f] = $("#res-select").value.split("x").map(Number);
-  $("#btn-apply-res").disabled = true;
-  const r = await fetch("/api/resolution", {
-    method: "POST",
-    headers: {"Content-Type": "application/json"},
-    body: JSON.stringify({ width: w, height: h, fps: f }),
-  });
-  status.textContent = JSON.stringify(await r.json());
-  $("#btn-apply-res").disabled = false;
-  await mountCameras();
-  await refreshStatus();
-});
-
 $("#btn-apply-off").addEventListener("click", async () => {
   const dx = Number($("#off-dx").value);
   const dy = Number($("#off-dy").value);
@@ -1043,7 +966,6 @@ $("#btn-ms-stop").addEventListener("click", () => msPost("stop"));
   // WebRTC setup + the MJPEG-fallback watchdog can take several seconds, and
   // the task dropdown / Run button / status poller must be usable immediately.
   await loadTasks();
-  await loadResolutions();
   await loadOffsets();
   await loadPreferences();
   setInterval(refreshStatus, 1500);
@@ -1116,8 +1038,6 @@ def make_app(state: DashboardState, fps: float = 30.0, webrtc=None) -> Flask:
         snap["transport"] = "rest"
         snap["molmoact_url"] = state.molmoact_url
         snap["progress"] = state.progress()
-        w, h, f = state.camera.resolution()
-        snap["resolution"] = {"width": w, "height": h, "fps": f}
         dx, dy, dz = state.get_cam_offsets()
         snap["cam_offsets"] = {"dx": dx, "dy": dy, "dz": dz}
         snap["motion_server"] = state.motion_server.status()
@@ -1142,29 +1062,6 @@ def make_app(state: DashboardState, fps: float = 30.0, webrtc=None) -> Flask:
     @app.route("/api/preferences")
     def api_preferences():
         return jsonify(state.preferences())
-
-    @app.route("/api/resolutions")
-    def api_resolutions():
-        w, h, f = state.camera.resolution()
-        return jsonify({
-            "presets": [{"width": p[0], "height": p[1], "fps": p[2]} for p in _RESOLUTIONS],
-            "current": {"width": w, "height": h, "fps": f},
-        })
-
-    @app.route("/api/resolution", methods=["POST"])
-    def api_resolution():
-        body = request.get_json(silent=True) or {}
-        try:
-            width = int(body["width"]); height = int(body["height"]); fps = int(body["fps"])
-        except (KeyError, TypeError, ValueError):
-            return jsonify({"ok": False, "error": "width, height, fps required (ints)"}), 400
-        if not state.action_lock.acquire("resolution"):
-            return jsonify({"ok": False, "error": "another action is in progress"}), 409
-        try:
-            result = state.set_resolution(width, height, fps)
-        finally:
-            state.action_lock.release(result)
-        return jsonify(result)
 
     @app.route("/api/offsets", methods=["GET", "POST"])
     def api_offsets():

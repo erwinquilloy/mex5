@@ -264,8 +264,8 @@ The motion_rest jump from FCI to REST/MCP is where the transport overhead lives.
 ## Dashboard (interactive web UI)
 
 Single-page Flask app for hands-on benchmarking: live camera tiles, a
-DROID task dropdown, runtime knobs for resolution and wrist-cam XYZ
-offsets, a launcher for `motion_server`, a live gripper state pill, and
+DROID task dropdown, runtime knobs for wrist-cam XYZ offsets, a launcher
+for `motion_server`, a live gripper state pill, and
 two action buttons (Home + Run Benchmark) with a Stop that aborts the
 in-flight chunk and re-homes. Replaces the old CLI prompts for
 operator-in-the-loop work.
@@ -297,9 +297,6 @@ FCI and MCP were removed from the dashboard; the CLI runner
   `motion_server` binary as a subprocess. Restart = re-runs
   `initialize()`, which calls `goHome` — so it doubles as an arm reset
   beyond `driver.home()`'s reach.
-- **Resolution dropdown:** swap between 320×240, 424×240, 640×480,
-  848×480, 1280×720 at 30 fps without restarting the dashboard. Tears
-  down + rebuilds the camera pipelines under a lock.
 - **Wrist-cam XYZ offset inputs:** set DX / DY / DZ live; pushed through
   `FrankaRestDriver.set_cam_offsets()`. Useful while tuning the
   cam-offset for terminal-row alignment.
@@ -326,8 +323,8 @@ FCI and MCP were removed from the dashboard; the CLI runner
   reports `grasp_fail_count`, `grasp_retries_used`, `grasp_retry_limit`,
   and `ever_held` so each failure mode is distinguishable from the
   payload alone.
-- **Persisted settings:** the four runtime knobs (XYZ offsets,
-  resolution, hold-min-dist, retry budget) are saved to
+- **Persisted settings:** the runtime knobs (XYZ offsets, hold-min-dist,
+  retry budget) are saved to
   `~/.cache/mex5_dashboard_settings.json` (override with
   `--settings-file`) on every apply / Run click and reloaded at startup.
   Tune once, restart freely, your inputs come back with the values you
@@ -382,26 +379,23 @@ The end-to-end flow for a single benchmark trial:
    **start**. The pill should flip from "stopped" to "running (pid …)".
    This also runs `initialize()` → `goHome`, so the arm should jog to
    home on first start.
-3. **Tune cameras (optional).** Pick a resolution from the dropdown if
-   the default 640×480 isn't what you want, and click **apply**. The
-   browser will reconnect the streams automatically.
-4. **Set wrist-cam offsets (optional).** Type DX / DY / DZ in the
+3. **Set wrist-cam offsets (optional).** Type DX / DY / DZ in the
    *wrist-cam XYZ offset* panel and click **apply**. These are pushed
    through to `FrankaRestDriver.set_cam_offsets()` — they take effect
    on the next chunk.
-5. **Set the hold-until-transported radius.** Default 0.08 m. Lower
+4. **Set the hold-until-transported radius.** Default 0.08 m. Lower
    it (e.g. 0.04 m) if your target tray is right next to pickup; 0
    disables the guard entirely.
-6. **Pick a task** from the dropdown (`apple_on_plate`,
+5. **Pick a task** from the dropdown (`apple_on_plate`,
    `pipette_in_tray`, etc.). The selected task's instruction shows
    underneath.
-7. **Home the arm** (Home button) and place the scene per the task's
+6. **Home the arm** (Home button) and place the scene per the task's
    `setup_notes`.
-8. **Click Run benchmark.** The dashboard loops
+7. **Click Run benchmark.** The dashboard loops
    capture → MolmoAct2 → execute, up to the task's `max_chunks`.
    Status panel shows live chunk progress, gripper state, and any
    suppression warnings.
-9. **Use Stop** at any time. The current chunk aborts within ~1–2 s
+8. **Use Stop** at any time. The current chunk aborts within ~1–2 s
    and the arm auto-homes.
 
 When you're done: Ctrl-C the dashboard. The launcher will gracefully
@@ -427,10 +421,8 @@ stop the motion_server subprocess on exit.
 
 | Path | Method | Use |
 |---|---|---|
-| `/api/status` | GET | live snapshot (busy, progress, resolution, offsets, gripper, motion_server) |
+| `/api/status` | GET | live snapshot (busy, progress, offsets, gripper, motion_server) |
 | `/api/tasks` | GET | enumerate the Table 6 tasks + their `target_zone_xy` |
-| `/api/resolutions` | GET | available presets + current |
-| `/api/resolution` | POST `{width, height, fps}` | swap presets |
 | `/api/offsets` | GET / POST `{dx, dy, dz}` | read or write wrist-cam offsets (persisted on POST) |
 | `/api/preferences` | GET | persisted trial knobs (hold-min-dist, retry budget) for UI repopulation |
 | `/api/home` | POST | drive to home |
@@ -456,7 +448,7 @@ every button POST returns a no-op. Useful for demoing or styling work.
 | Need | Use |
 |---|---|
 | Hands-on "type an instruction and watch the arm try it" | dashboard |
-| Live camera streams + per-trial knobs (offsets, resolution, hold-dist) | dashboard |
+| Live camera streams + per-trial knobs (offsets, hold-dist) | dashboard |
 | Launch/restart motion_server from a UI | dashboard |
 | Reproduce Table 6 with N trials, per-task scoring, results JSON | CLI runner |
 | Auto-home + operator-graded success between trials | CLI runner |
