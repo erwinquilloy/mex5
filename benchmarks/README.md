@@ -263,151 +263,229 @@ The motion_rest jump from FCI to REST/MCP is where the transport overhead lives.
 
 ## Dashboard (interactive web UI)
 
-For ad-hoc driving — type an instruction, see what the model does, watch the
-streams — there's a Flask dashboard that replaces the CLI prompts:
+Single-page Flask app for hands-on benchmarking: live camera tiles, a
+DROID task dropdown, runtime knobs for resolution and wrist-cam XYZ
+offsets, a launcher for `motion_server`, a live gripper state pill, and
+two action buttons (Home + Run Benchmark) with a Stop that aborts the
+in-flight chunk and re-homes. Replaces the old CLI prompts for
+operator-in-the-loop work.
 
-- Two live video tiles: external webcam, wrist RealSense RGB. Defaults
-  to **WebRTC** (smoother, lower latency) when `aiortc` + `av` are
-  installed, with automatic fallback to **MJPEG** otherwise. Pass
-  `--no-webrtc` to force MJPEG, or `pip install aiortc av` on the
-  workstation to enable WebRTC. (The model is RGB-only; depth was
-  removed since it was display-only and unused by inference.) Per-tile
-  caption shows `[webrtc]` or `[mjpeg]` so you can see which transport
-  the browser actually negotiated.
-- **Home** button → calls `driver.home()` on whichever transport is active.
-- **Instruction input + Run** button → one inference→exec cycle per click
-  (capture → MolmoAct2 → execute the returned chunk). Click again to keep
-  going. No success grading, no result-file writes — use the CLI runner for
-  that.
-- Transport **dropdown**: FCI or REST only (MCP is dashboard-disabled;
-  use the CLI runner for MCP). Auto-detected at startup from env vars
-  (precedence `FRANKA_REST_HOST > FRANKA_HOST`); the dropdown lets you
-  switch without restarting (the underlying constraints still apply —
-  motion_server must be stopped to switch to FCI, running to switch to
-  REST). If `FRANKA_MCP_URL` is the only thing set, the dashboard
-  errors at startup with a clear message; unset it or set
-  `FRANKA_REST_HOST` instead.
+The dashboard is **REST-only** — it talks to `motion_server` exclusively.
+FCI and MCP were removed from the dashboard; the CLI runner
+(`run_droid_benchmark.py`) still supports both.
 
-### Launching the dashboard
+### What you get
 
-The dashboard owns the cameras, so **stop `run_droid_benchmark.py` first** —
-both can't open the RealSense at the same time. It also needs the same
-upstream pieces as the CLI runner (model server + tunnel, plus motion_server
-/ mcp_server for the REST and MCP transports respectively).
+- **Three live camera tiles:** 2 external webcams + wrist RealSense RGB.
+  The two externals are stacked horizontally before being fed to
+  MolmoAct2 (DROID training convention). Streaming defaults to
+  **WebRTC** when `aiortc` + `av` are installed, with automatic fallback
+  to **MJPEG** otherwise. Per-tile tag shows `[webrtc]` or `[mjpeg]`.
+- **Gripper status pill** in the page header (open / holding / closed /
+  busy / error) updated from the latest `readJointState`. Polled every
+  1.5 s and skipped while a trial holds the driver lock.
+- **Task dropdown:** populated from `droid_tasks.TASKS` (the Table 6
+  list). Each task carries its own `max_chunks` and instruction; the
+  Run button just executes whichever task is selected.
+- **Home button** → `driver.home()` (cartesian-interpolated to FK'd
+  home).
+- **Run benchmark button** → one full trial of the selected task
+  (capture → infer → exec, up to the task's `max_chunks`).
+- **Stop button** → cancels mid-chunk (~1–2 s worst-case latency) and
+  auto-homes the arm.
+- **motion_server launcher panel:** start / stop / restart the
+  `motion_server` binary as a subprocess. Restart = re-runs
+  `initialize()`, which calls `goHome` — so it doubles as an arm reset
+  beyond `driver.home()`'s reach.
+- **Resolution dropdown:** swap between 320×240, 424×240, 640×480,
+  848×480, 1280×720 at 30 fps without restarting the dashboard. Tears
+  down + rebuilds the camera pipelines under a lock.
+- **Wrist-cam XYZ offset inputs:** set DX / DY / DZ live; pushed through
+  `FrankaRestDriver.set_cam_offsets()`. Useful while tuning the
+  cam-offset for terminal-row alignment.
+- **Hold-until-transported guard:** since no Table 6 task carries a
+  fixed `target_zone_xy`, the dashboard falls back to a distance
+  heuristic — once the policy first grasps an object, no policy-emitted
+  open is honoured until the TCP has moved ≥ `hold_min_dist_m` (default
+  0.08 m) from the pickup XY. Configurable per trial from the panel; set
+  to 0 to disable. If a task ever gets a `target_zone_xy` defined, that
+  static box takes precedence.
+- **Grasp-fail detection:** if the previous chunk commanded close but
+  the gripper width is now < 5 mm (jaws closed-empty), the dashboard
+  logs a `grasp_fail` warning and bumps `grasp_fail_count` in the trial
+  result payload.
+- **Hold-empty guard:** if no successful grasp has been observed this
+  trial yet, open commands are suppressed while the jaws are
+  closed-empty (the "open" is just noise — there's nothing to release).
+  Blocks the policy's natural retry-after-fail opens; use **Stop** to
+  re-home and re-try by hand.
 
-**Prerequisites checklist** (only what your chosen transport needs):
+### Prerequisites
 
-- [ ] `host_server_droid.py` running on the HPC, port 8000
-- [ ] SSH tunnel up: `ssh -N -L 8000:localhost:8000 <hpc>` (and `curl http://localhost:8000/act` returns ok)
-- [ ] Cameras connected (RealSense D457 wrist + USB webcam external)
-- [ ] CLI runner stopped (`pkill -f run_droid_benchmark` if you're not sure)
-- [ ] **FCI only:** robot in white/unlocked state, FCI activated, motion_server **stopped**
-- [ ] **REST only:** motion_server running (see the rebuild + launch steps below)
-- [ ] **MCP only:** motion_server running, **and** mcp_server.py running
-- [ ] *(Optional)* `pip install aiortc av` for WebRTC streaming — smoother
-  preview than MJPEG. Already included in `benchmarks/requirements.txt`,
-  but PyAV's FFmpeg wheel is a chunky install, so skip on machines that
-  only run the CLI runner.
+The dashboard owns the cameras and talks to `motion_server`, so:
 
-Common env vars (cameras):
+- [ ] `host_server_droid.py` running on the HPC at port 8000
+- [ ] SSH tunnel up: `ssh -N -L 8000:localhost:8000 <hpc>` (test with
+      `curl http://localhost:8000/act`)
+- [ ] Cameras connected: RealSense D45x wrist + two USB webcams
+- [ ] CLI runner stopped: `pkill -f run_droid_benchmark`
+- [ ] `FRANKA_REST_HOST` exported (the dashboard refuses to start
+      without it now)
+- [ ] `motion_server` binary built (`cd franka/cpp/build && cmake .. && make`)
+      — you can start it from the dashboard's launcher panel, no need
+      to spawn it manually
+- [ ] *(Optional)* `pip install aiortc av` for WebRTC streaming
+
+### Launching
+
+Pick indices for your two external webcams (see `v4l2-ctl --list-devices`),
+then export and run:
 
 ```bash
-cd ~/mex5
-# Two external webcams at the back of the arm, 45° inward — stacked left→right.
-export FRANKA_BENCH_EXT_INDEX=2            # left physical cam  (airscan4: /dev/video2)
-export FRANKA_BENCH_EXT_INDEX2=0           # right physical cam (airscan4: /dev/video0)
-# No per-camera flip needed: raw output is already spatially correct.
-# optional: export FRANKA_BENCH_WRIST_SERIAL=<D457 serial>
-# Per-camera rotation if needed: FRANKA_BENCH_EXT_ROT_DEG / FRANKA_BENCH_EXT2_ROT_DEG ∈ {0,90,180,270}
-```
+cd ~/erwin/mex5
+export FRANKA_REST_HOST=192.168.2.1            # motion_server host, NOT the robot FCI IP
+export FRANKA_BENCH_EXT_INDEX=0                # first external webcam (capture node)
+export FRANKA_BENCH_EXT_INDEX2=2               # second external webcam
+# optional: export FRANKA_BENCH_WRIST_SERIAL=<D45x serial>
+# optional: per-camera rotation if needed: FRANKA_BENCH_EXT_ROT_DEG / _EXT2_ROT_DEG ∈ {0,90,180,270}
 
-Then pick one of the three launches.
-
-#### Launch (FCI)
-
-```bash
-export FRANKA_HOST=192.168.2.100
-python -m benchmarks.scripts.serve_dashboard \
-    --port 8080 --molmoact-url http://localhost:8000
-```
-
-One-liner:
-```bash
-FRANKA_BENCH_EXT_INDEX=2 FRANKA_BENCH_EXT_INDEX2=0 FRANKA_HOST=192.168.2.100 python -m benchmarks.scripts.serve_dashboard --port 8080 --molmoact-url http://localhost:8000
-```
-
-#### Launch (REST)
-
-```bash
-# in another terminal on the motion_server host:
-cd ~/mex5/franka/cpp/build && ./motion_server
-
-# in the dashboard terminal:
-export FRANKA_REST_HOST=192.168.2.1
-python -m benchmarks.scripts.serve_dashboard \
-    --port 8080 --molmoact-url http://localhost:8000 \
+python -m benchmarks.scripts.serve_dashboard --port 8080 \
+    --molmoact-url http://localhost:8000 \
     --rest-step-time-s 2.5
 ```
 
-One-liner:
-```bash
-FRANKA_BENCH_EXT_INDEX=2 FRANKA_BENCH_EXT_INDEX2=0 FRANKA_REST_HOST=192.168.2.1 python -m benchmarks.scripts.serve_dashboard --port 8080 --molmoact-url http://localhost:8000 --rest-step-time-s 2.5
-```
+Then open `http://<workstation-ip>:8080/` in a browser. The default
+`--motion-server-bin` searches for `<repo>/franka/cpp/build/motion_server`;
+override with `--motion-server-bin /path/to/binary` if it's elsewhere.
 
-> **Note:** MCP is no longer supported on the dashboard. Use FCI or
-> REST. The CLI runner (`run_droid_benchmark.py`) still supports MCP,
-> so if you need to drive MCP, use the CLI.
+### Recommended workflow
 
-#### Using the dashboard
+The end-to-end flow for a single benchmark trial:
 
-1. Open `http://<workstation-ip>:8080/` in a browser.
-2. Confirm both video tiles are live (external, wrist RGB). If wrist RGB
-   stays black, check `FRANKA_BENCH_WRIST_SERIAL` and that the D457
-   USB-C switch is set per `franka/README.md`.
-3. The status line at the bottom shows the auto-detected transport. To
-   switch, pick a different option in the dropdown (the underlying
-   constraints in the prerequisites still apply — switching to FCI while
-   motion_server is running will fail loudly).
-4. Click **home** to reset the arm.
-5. Type an instruction (e.g. *"Put the apple on the plate."*), click
-   **run trial**. The dashboard loops capture→infer→exec up to
-   `--max-chunks` chunks (default 30, same as the CLI runner), so a
-   single click runs the whole trial. Watch the status line for
-   `chunk N/30` progress.
-6. Click **stop** at any time to break out at the next chunk boundary
-   (the in-flight chunk finishes its motion first; the loop doesn't
-   resume).
+1. **Open the dashboard** at `http://<workstation-ip>:8080/`. Confirm
+   all three tiles are live and the tag reads `[webrtc]` (or
+   `[mjpeg]` if WebRTC isn't installed).
+2. **Start motion_server.** From the *motion_server* panel, click
+   **start**. The pill should flip from "stopped" to "running (pid …)".
+   This also runs `initialize()` → `goHome`, so the arm should jog to
+   home on first start.
+3. **Tune cameras (optional).** Pick a resolution from the dropdown if
+   the default 640×480 isn't what you want, and click **apply**. The
+   browser will reconnect the streams automatically.
+4. **Set wrist-cam offsets (optional).** Type DX / DY / DZ in the
+   *wrist-cam XYZ offset* panel and click **apply**. These are pushed
+   through to `FrankaRestDriver.set_cam_offsets()` — they take effect
+   on the next chunk.
+5. **Set the hold-until-transported radius.** Default 0.08 m. Lower
+   it (e.g. 0.04 m) if your target tray is right next to pickup; 0
+   disables the guard entirely.
+6. **Pick a task** from the dropdown (`apple_on_plate`,
+   `pipette_in_tray`, etc.). The selected task's instruction shows
+   underneath.
+7. **Home the arm** (Home button) and place the scene per the task's
+   `setup_notes`.
+8. **Click Run benchmark.** The dashboard loops
+   capture → MolmoAct2 → execute, up to the task's `max_chunks`.
+   Status panel shows live chunk progress, gripper state, and any
+   suppression warnings.
+9. **Use Stop** at any time. The current chunk aborts within ~1–2 s
+   and the arm auto-homes.
 
-Stop the dashboard with Ctrl-C in its terminal; it closes the driver and
-releases the cameras.
+When you're done: Ctrl-C the dashboard. The launcher will gracefully
+stop the motion_server subprocess on exit.
 
-#### Useful flags
+### Useful flags
 
 | Flag | Default | What it does |
 |---|---|---|
 | `--port` | `8080` | dashboard HTTP port |
+| `--host` | `0.0.0.0` | bind address |
 | `--molmoact-url` | `http://localhost:8000` | MolmoAct2-DROID server |
-| `--transport {fci,rest,mcp}` | autodetect | override env-var selection |
-| `--rest-step-time-s` | `2.5` | per-row REST move time (REST/MCP only) |
-| `--exec-rows` | `3` | rows of each chunk to run when the policy is in fine-refinement mode |
-| `--max-chunks` | `30` | safety cap on chunks per **run trial** click. Mirrors the CLI runner's `--max-chunks`. |
+| `--rest-step-time-s` | `2.5` | per-row REST move time (slow zone) |
+| `--exec-rows` | `3` | rows of each chunk to execute when the policy is in fine-refinement mode |
+| `--max-chunks` | `30` | safety cap when the selected task has no `max_chunks` of its own |
 | `--mjpeg-fps` | `30.0` | MJPEG fallback refresh rate (ignored when WebRTC is active) |
-| `--no-webrtc` | off | force MJPEG streaming even if `aiortc` is installed (debugging aid) |
+| `--no-webrtc` | off | force MJPEG even if `aiortc` is installed |
+| `--motion-server-bin` | autodetect | path to the motion_server binary; defaults to `<repo>/franka/cpp/build/motion_server` |
+| `--motion-server-log` | unset | write motion_server stdout+stderr to this file |
+
+### REST endpoints (for debugging / scripting)
+
+| Path | Method | Use |
+|---|---|---|
+| `/api/status` | GET | live snapshot (busy, progress, resolution, offsets, gripper, motion_server) |
+| `/api/tasks` | GET | enumerate the Table 6 tasks + their `target_zone_xy` |
+| `/api/resolutions` | GET | available presets + current |
+| `/api/resolution` | POST `{width, height, fps}` | swap presets |
+| `/api/offsets` | GET / POST `{dx, dy, dz}` | read or write wrist-cam offsets |
+| `/api/home` | POST | drive to home |
+| `/api/task` | POST `{task_id, instruction, max_chunks, hold_min_dist_m}` | run one trial |
+| `/api/stop` | POST | signal abort; trial loop interrupts current chunk + homes |
+| `/api/motion_server/{start,stop,restart,status}` | POST/GET | manage the subprocess |
+
+### Preview-only mode (no hardware)
+
+If you just want to eyeball the UI on a machine without cameras or
+`motion_server`:
+
+```bash
+python -m benchmarks.scripts.preview_dashboard --port 8081
+```
+
+The three tiles show placeholder JPEGs ("PREVIEW MODE — no camera
+attached"), the task dropdown still loads from `droid_tasks.py`, and
+every button POST returns a no-op. Useful for demoing or styling work.
 
 ### Dashboard vs CLI runner
 
 | Need | Use |
 |---|---|
-| Quick "type an instruction and watch the arm try it" | dashboard |
-| Live camera streams in a browser (WebRTC or MJPEG) | dashboard |
-| Single-trial loop (capture→infer→exec up to `--max-chunks`) | either — dashboard's **run trial** does this too now |
+| Hands-on "type an instruction and watch the arm try it" | dashboard |
+| Live camera streams + per-trial knobs (offsets, resolution, hold-dist) | dashboard |
+| Launch/restart motion_server from a UI | dashboard |
 | Reproduce Table 6 with N trials, per-task scoring, results JSON | CLI runner |
 | Auto-home + operator-graded success between trials | CLI runner |
-| `--hold-until-target` debug guard | CLI runner only |
+| FCI or MCP transports | CLI runner |
+| `--hold-until-target` with a fixed `target_zone_xy` | CLI runner |
 
-The two share the same drivers (`PandaDriver` / `FrankaRestDriver` /
-`FrankaMcpDriver`) and the same `DroidClient`, so model+transport behavior is
-identical — the dashboard is just an interactive shell around them.
+They share `FrankaRestDriver`, `DroidClient`, `droid_runner._enforce_*`
+helpers, so model + transport behavior is identical — the dashboard is
+an interactive shell around the same core.
+
+#### Mutual exclusion — only one can run at a time
+
+The dashboard and the CLI runner can **never** run simultaneously:
+
+- **RealSense.** `pyrealsense2` lets one process open the wrist cam at
+  a time. Both `DashboardCamera` and `DualCamera` call
+  `pipeline.start()` on the same serial; whichever starts second
+  errors with `xioctl(VIDIOC_S_FMT) failed, errno=16` or
+  `Device or resource busy`.
+- **motion_server.** Holds FCI exclusively. If a CLI runner started
+  with `--transport fci` is already up, motion_server can't acquire
+  FCI.
+
+Symptoms when you forget:
+
+```
+# trying to start the CLI while the dashboard is up
+RuntimeError: Couldn't resolve requests
+# or
+xioctl(VIDIOC_S_FMT) failed, errno=16 Last Error: Device or resource busy
+```
+
+Switching between the two cleanly:
+
+```bash
+# dashboard → CLI
+# Ctrl-C the dashboard; pgrep -af serve_dashboard should be empty.
+# If RealSense stays busy, unplug + replug the USB cable.
+python -m benchmarks.scripts.run_droid_benchmark --tasks apple_on_plate ...
+
+# CLI → dashboard
+pkill -f run_droid_benchmark
+python -m benchmarks.scripts.serve_dashboard --port 8080
+```
 
 #### Mutual exclusion — only one can run at a time
 
