@@ -377,6 +377,8 @@ class FrankaRestDriver:
 
         x_c, y_c, z_c = float(T_cur[0, 3]), float(T_cur[1, 3]), float(T_cur[2, 3])
         x_t, y_t, z_t = float(T_tgt[0, 3]), float(T_tgt[1, 3]), float(T_tgt[2, 3])
+        # Raw policy target (pre-offset), kept for the cam-calibration log below.
+        raw_x_t, raw_y_t, raw_z_t = x_t, y_t, z_t
         if apply_cam_offset:
             x_t += self._cam_dx_m
             y_t += self._cam_dy_m
@@ -394,6 +396,16 @@ class FrankaRestDriver:
                 f"Z[>= {_LAB_Z_MIN:.3f}]"
             )
         x_t, y_t, z_t = x_clipped, y_clipped, z_clipped
+        if apply_cam_offset:
+            # Cam-offset calibration aid: with offsets zeroed, "policy" is where
+            # the model wanted to grasp. delta = policy - object_known_xyz, and
+            # the correcting offset to dial into the dashboard is -delta.
+            print(
+                f"[cam-calib] grasp-terminal target: "
+                f"policy=({raw_x_t:+.4f}, {raw_y_t:+.4f}, {raw_z_t:+.4f}) "
+                f"offset=({self._cam_dx_m:+.4f}, {self._cam_dy_m:+.4f}, {self._cam_dz_m:+.4f}) "
+                f"commanded=({x_t:+.4f}, {y_t:+.4f}, {z_t:+.4f}) m"
+            )
         a_c, b_c, g_c = _zyx_euler_from_R(T_cur[:3, :3])
         a_t, b_t, g_t = _zyx_euler_from_R(T_tgt[:3, :3])
 
