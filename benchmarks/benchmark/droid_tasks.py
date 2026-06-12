@@ -46,10 +46,10 @@ TASKS: list[DroidTask] = [
     ),
     DroidTask(
         task_id="pipette_in_tray",
-        instruction="Put the pipette in the tray.",
+        instruction="Put the marker in the tray.",
         setup_notes=(
-            "Pipette on the table, tray on the side. OOD pipette color/shape "
-            "preferred. Re-randomize cam pose."
+            "Marker on the table (stand-in for the pipette), tray on the side. "
+            "OOD marker color/shape preferred. Re-randomize cam pose."
         ),
         paper_success_rate=86.7,
     ),
