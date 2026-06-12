@@ -8,7 +8,7 @@
 //   - moveToCartesian() catches franka::Exception, calls automaticErrorRecovery() to
 //     unlock the robot, then returns HTTP 400 with a "collision_recovery:" prefix so
 //     the Python side can decide what motion to perform next.
-//   - initialize() uses the same goHome() prompt as motion_server (press Enter before moving).
+//   - initialize() uses goHomeAuto() (no stdin prompt) so it can run headless as a subprocess.
 
 #include <cpprest/http_listener.h>
 #include <cpprest/json.h>
@@ -46,10 +46,12 @@ public:
     }
 
     void initialize() {
-        // Same startup behaviour as motion_server: prompt user before moving.
+        // Headless startup: goHomeAuto() moves to home without the interactive
+        // "Press Enter to continue" prompt that goHome() blocks on -- the server
+        // runs as a subprocess with no stdin, so a prompt would hang forever.
         // If the arm can't reach home (obstacle, joint limit), abort with a clear message.
         try {
-            goHome(robot);
+            goHomeAuto(robot);
         } catch (const franka::Exception& e) {
             throw std::runtime_error(
                 std::string("initialize(): failed to move to home position: ") + e.what());
