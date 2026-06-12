@@ -72,6 +72,7 @@ Tunable via env vars (all optional):
 """
 from __future__ import annotations
 
+import logging
 import math
 import os
 import time
@@ -82,6 +83,8 @@ import numpy as np
 import requests
 
 from .driver_errors import CollisionAborted
+
+log = logging.getLogger("dashboard.driver")
 
 _HOME_Q = np.array([0., -np.pi/4, 0., -3*np.pi/4, 0., np.pi/2, np.pi/4], dtype=np.float64)
 _GRIPPER_MAX_M = 0.08
@@ -400,11 +403,13 @@ class FrankaRestDriver:
             # Cam-offset calibration aid: with offsets zeroed, "policy" is where
             # the model wanted to grasp. delta = policy - object_known_xyz, and
             # the correcting offset to dial into the dashboard is -delta.
-            print(
-                f"[cam-calib] grasp-terminal target: "
-                f"policy=({raw_x_t:+.4f}, {raw_y_t:+.4f}, {raw_z_t:+.4f}) "
-                f"offset=({self._cam_dx_m:+.4f}, {self._cam_dy_m:+.4f}, {self._cam_dz_m:+.4f}) "
-                f"commanded=({x_t:+.4f}, {y_t:+.4f}, {z_t:+.4f}) m"
+            log.warning(
+                "cam-calib grasp-terminal target: "
+                "policy=(%+.4f, %+.4f, %+.4f) offset=(%+.4f, %+.4f, %+.4f) "
+                "commanded=(%+.4f, %+.4f, %+.4f) m",
+                raw_x_t, raw_y_t, raw_z_t,
+                self._cam_dx_m, self._cam_dy_m, self._cam_dz_m,
+                x_t, y_t, z_t,
             )
         a_c, b_c, g_c = _zyx_euler_from_R(T_cur[:3, :3])
         a_t, b_t, g_t = _zyx_euler_from_R(T_tgt[:3, :3])

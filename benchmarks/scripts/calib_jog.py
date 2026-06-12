@@ -40,6 +40,7 @@ import sys
 
 import numpy as np
 
+from benchmarks.benchmark.driver_errors import CollisionAborted
 from benchmarks.benchmark.franka_rest_driver import (
     FrankaRestDriver,
     _GRIPPER_MAX_M,
@@ -108,8 +109,18 @@ def _goto(driver: FrankaRestDriver, x: float, y: float, z: float,
         0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
         t_sec=t_sec, lock_down=True,
     )
-    for xf, yf, zf, tf, da, db, dg in substeps:
-        driver._post("moveToCartesian", [xf, yf, zf, tf, da, db, dg])
+    try:
+        for xf, yf, zf, tf, da, db, dg in substeps:
+            driver._post("moveToCartesian", [xf, yf, zf, tf, da, db, dg])
+    except CollisionAborted:
+        # A reflex during a jog usually means the gripper contacted something
+        # (the table, or the object). That's a normal outcome when probing for
+        # contact height -- report where it stopped instead of crashing.
+        # motion_server has already run automaticErrorRecovery, so the arm is
+        # movable again (e.g. jog back up).
+        print("[calib_jog] motion aborted by a reflex (contact). Stopped at:")
+        _print_pose(driver, prefix="[calib_jog] contact: ")
+        return 2
     _print_pose(driver, prefix="[calib_jog] arrived: ")
     return 0
 
