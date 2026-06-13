@@ -456,6 +456,61 @@ class FrankaRestDriver:
         self._post("openGripper", [_GRIPPER_MAX_M])
         self._last_grip = False
 
+    # ----- receding-horizon primitives -----
+    # Thin wrappers used by the dashboard's receding-horizon execution mode
+    # (do_task_receding). Kept separate from send_chunk so that path stays
+    # untouched. _post raises CollisionAborted on a "collision_recovery:" reply,
+    # which the loop catches for home-recovery.
+
+    def move_to_joint_pose(self, q7: Sequence[float], tf: float) -> list[float]:
+        """Move to an absolute 7-DOF joint pose via motion_server's
+        moveToJointPose (no FK->cartesian->IK round trip). Returns the final
+        joint angles read back by the server."""
+        params = [float(q) for q in q7]
+        if len(params) != 7:
+            raise ValueError(f"move_to_joint_pose expects 7 joints, got {len(params)}")
+        params.append(float(tf))
+        body = self._post("moveToJointPose", params)
+        return list(body.get("moveToJointPose", []))
+
+    def home_joints(self, tf: float = _DEFAULT_HOME_TIME_S) -> list[float]:
+        """Joint-space home (for collision recovery in the receding loop)."""
+        return self.move_to_joint_pose(_HOME_Q.tolist(), tf)
+
+    def grasp(self, width: float = 0.01) -> str:
+        """Close on an object and return motion_server's firmware response
+        string (``"Object grasped successfully."`` on a confirmed grasp, a
+        failure string otherwise). Unlike _set_gripper this does not cache or
+        short-circuit -- a grasp attempt always runs."""
+        body = self._post("closeGripper", [float(width)])
+        self._last_grip = True
+        return str(body.get("closeGripper", ""))
+
+    def open_gripper_verified(self) -> str:
+        """Open the jaws and return motion_server's response string."""
+        body = self._post("openGripper", [_GRIPPER_MAX_M])
+        self._last_grip = False
+        return str(body.get("openGripper", ""))
+
+    def read_cartesian(self) -> list[float]:
+        """Current TCP pose [x, y, z, alpha, beta, gamma] via readState."""
+        body = self._post("readState", [])
+        return list(body.get("readState", []))
+
+    def move_by_base_offset(self, offset_xyz: Sequence[float], tf: float,
+                            min_z: float = 0.02) -> None:
+        """Translate the TCP by a base-frame XYZ offset, orientation held.
+        Z is floored at ``min_z`` so a downward nudge can't push into the
+        table. Port of steven's _move_by_base_offset."""
+        pose = self.read_cartesian()
+        if len(pose) < 3 or not all(math.isfinite(v) for v in pose[:3]):
+            raise RuntimeError(f"readState returned an invalid pose: {pose!r}")
+        x = float(pose[0]) + float(offset_xyz[0])
+        y = float(pose[1]) + float(offset_xyz[1])
+        z = max(float(pose[2]) + float(offset_xyz[2]), float(min_z))
+        # moveToCartesian: [x, y, z, tf, dAlpha, dBeta, dGamma]; zero rotation.
+        self._post("moveToCartesian", [x, y, z, float(tf), 0.0, 0.0, 0.0])
+
     def send_chunk(
         self,
         actions: np.ndarray,

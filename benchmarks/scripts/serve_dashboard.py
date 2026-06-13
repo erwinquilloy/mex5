@@ -40,6 +40,7 @@ from flask import Flask, Response, jsonify, request
 from benchmarks.benchmark.dashboard_camera import DashboardCamera, from_env as camera_from_env
 from benchmarks.benchmark.driver_errors import CollisionAborted
 from benchmarks.benchmark import droid_tasks
+from benchmarks.benchmark import receding
 from benchmarks.benchmark.droid_runner import (
     _enforce_hold_until_target,
     _enforce_hold_until_transported,
@@ -236,8 +237,12 @@ class DashboardState:
         max_chunks: int = 30,
         motion_server: Optional[MotionServerLauncher] = None,
         settings: Optional[DashboardSettings] = None,
+        execution_mode: str = "chunk",
     ):
         self.molmoact_url = molmoact_url
+        # "chunk" (default cartesian chunk-streaming + cam-offset) or "receding"
+        # (joint-space, transition-aware, one clipped waypoint per inference).
+        self.execution_mode = str(execution_mode).strip().lower()
         self.client = DroidClient(molmoact_url)
         self.camera = camera_from_env()
         self.transport = "rest"
@@ -475,6 +480,249 @@ class DashboardState:
             "grasp_retries_used": grasp_retries_used,
             "grasp_retry_limit": grasp_retry_limit,
             "ever_held": ever_held,
+            "homed_after_stop": homed_after_stop,
+            "home_error": home_error,
+        }
+
+    def do_task_receding(self, instruction: str, max_chunks: Optional[int] = None,
+                         task_id: Optional[str] = None,
+                         grasp_retry_limit: int = 3,
+                         hold_min_dist_m: float = 0.08) -> dict:
+        """Receding-horizon, transition-aware execution -- the flag-gated
+        alternative to do_task (--execution-mode receding). Per inference pick
+        one waypoint (gripper-transition row, else farthest within budget), move
+        the full distance there via moveToJointPose (speed-limited), then
+        re-perceive. Grasp uses the firmware response + an optional pre-grasp
+        descent and a fixed XY correction. A hold-until-transported guard
+        suppresses a policy release until the TCP has moved >= hold_min_dist_m
+        from the pickup XY (0 disables), so a mid-transport gripper dip can't
+        drop the object early. Knobs live in benchmarks/benchmark/receding.py."""
+        cfg = receding.RecedingConfig.from_env()
+        self._stop_event.clear()
+        cap = int(max_chunks) if max_chunks is not None else self.max_chunks
+        log.info("receding-horizon trial start (task=%s, cap=%d, "
+                 "max_step_delta=%.3f, exec_time_s=%.2f, close_thr=%.2f)",
+                 task_id or "custom", cap, cfg.max_step_delta,
+                 cfg.exec_time_s, cfg.gripper_close_threshold)
+        t0 = time.perf_counter()
+        steps_done = 0
+        total_server_ms = 0.0
+        total_rtt_ms = 0.0
+        gripper_closed = False
+        failed_grasps = 0
+        collision_recoveries = 0
+        ever_held = False
+        grasp_xy: Optional[tuple] = None   # pickup TCP XY, for the hold guard
+        total_suppressed = 0
+        stopped_by = "max_chunks"
+
+        try:
+            with self._driver_lock:
+                self.driver.open_gripper_verified()
+        except Exception as e:
+            self._set_progress(0, 0)
+            return {"ok": False, "error": f"initial gripper open failed: {e}",
+                    "stopped_by": "error", "chunks_done": 0}
+
+        for step in range(cap):
+            if self._stop_event.is_set():
+                stopped_by = "stop_requested"
+                break
+            self._set_progress(step + 1, cap)
+
+            ext_rgb, wrist_rgb, _ = self.camera.latest_rgb_pair()
+            if ext_rgb is None or wrist_rgb is None:
+                self._set_progress(0, 0)
+                return {"ok": False, "error": "cameras not ready yet",
+                        "chunks_done": steps_done}
+
+            with self._driver_lock:
+                joints = np.asarray(self.driver.get_state().q, dtype=np.float64)
+            # DROID convention: feed tracked gripper closedness (0/1), not width.
+            state8 = np.concatenate(
+                [joints, [1.0 if gripper_closed else 0.0]]).astype(np.float32)
+
+            pred = self.client.act(
+                external_cam=ext_rgb, wrist_cam=wrist_rgb,
+                instruction=instruction, state=state8, num_steps=10,
+            )
+            try:
+                actions = receding.validate_actions(pred.actions)
+            except ValueError as e:
+                self._set_progress(0, 0)
+                return {"ok": False, "error": f"invalid actions: {e}",
+                        "chunks_done": steps_done}
+            total_server_ms += float(pred.server_dt_ms)
+            total_rtt_ms += float(pred.rtt_ms)
+
+            # Pick the waypoint to execute (Deo): the gripper-transition row when
+            # the chunk grasps/releases -- so we actuate AT the policy's grasp/
+            # place pose -- else the farthest approach waypoint within the per-step
+            # joint budget (proximity-aware lookahead).
+            intent, transition_index = receding.find_gripper_transition(
+                actions, gripper_closed,
+                cfg.gripper_close_threshold, cfg.gripper_open_threshold)
+            # Hold-until-transported guard: while holding, ignore a policy release
+            # until the TCP has moved >= hold_min_dist_m from the pickup XY, so a
+            # mid-transport gripper dip can't drop the object near pickup. When
+            # suppressed, keep holding and advance (budget-bounded) toward the
+            # would-be release row instead of opening.
+            suppress_open = False
+            if (intent == "open" and gripper_closed and grasp_xy is not None
+                    and hold_min_dist_m > 0.0):
+                try:
+                    cxy = self.driver.read_cartesian()[:2]
+                    dist = float(np.hypot(cxy[0] - grasp_xy[0],
+                                          cxy[1] - grasp_xy[1]))
+                except Exception:
+                    dist = hold_min_dist_m  # on read failure, don't suppress
+                if dist < hold_min_dist_m:
+                    suppress_open = True
+                    total_suppressed += 1
+                    log.warning(
+                        "hold-until-transported: suppressing release "
+                        "(%.3f m < %.3f m from pickup); keep transporting",
+                        dist, hold_min_dist_m)
+            if transition_index is not None and not suppress_open:
+                exec_idx = transition_index
+            else:
+                # No transition, or release suppressed: advance toward the (capped)
+                # target without releasing.
+                cap_idx = (transition_index if suppress_open
+                           and transition_index is not None else cfg.exec_index)
+                exec_idx = receding.select_waypoint_index_within_budget(
+                    actions, joints, cfg.max_step_delta, cap_idx)
+            waypoint = np.asarray(actions[exec_idx, :7], dtype=np.float64)
+            cmd = ("close" if actions[exec_idx, 7] >= cfg.gripper_close_threshold
+                   else "open")
+            if suppress_open:
+                cmd = "close"   # force hold while transporting away from pickup
+            tf = receding.speed_limited_tf(
+                waypoint, joints, cfg.exec_time_s, cfg.max_joint_speed)
+
+            g = actions[:, 7].astype(np.float64)
+            log.info(
+                "[receding step %03d] exec_idx=%02d transition=%s intent=%s "
+                "cmd=%s tracked_closed=%d tf=%.2f g[min=%.3f max=%.3f last=%.3f]",
+                step, exec_idx, transition_index, intent, cmd,
+                int(gripper_closed), tf, float(g.min()), float(g.max()),
+                float(g[-1]),
+            )
+
+            try:
+                with self._driver_lock:
+                    # Full move to the selected waypoint (speed-limited tf, no
+                    # delta clip). grasp-on-contact: if a close move reflexes, the
+                    # hand hit the target object -> close on it instead of
+                    # aborting; any other reflex re-raises to note-and-continue.
+                    reached = True
+                    try:
+                        self.driver.move_to_joint_pose(waypoint.tolist(), tf)
+                    except CollisionAborted:
+                        if not (cmd == "close" and cfg.grasp_on_contact):
+                            raise
+                        reached = False
+                        log.info("[grasp-on-contact] reflex during grasp move "
+                                 "-> closing on the contacted object")
+                    if self._stop_event.is_set():
+                        stopped_by = "stop_requested"
+                        break
+                    # Actuate the gripper only when the command changed -- close on
+                    # the object at the grasp pose, open at the place pose.
+                    if cmd == "close" and not gripper_closed:
+                        if reached:
+                            # Fixed lateral correction for the policy's systematic
+                            # XY bias (closed loop can't remove it). Applied at the
+                            # grasp pose before descending; 0,0 trusts the policy.
+                            gx, gy = cfg.grasp_xy_offset_m
+                            if gx or gy:
+                                self.driver.move_by_base_offset(
+                                    (gx, gy, 0.0), cfg.grasp_xy_time_s,
+                                    min_z=cfg.pregrasp_z_min)
+                            # Optional Z-only pre-grasp descent (Deo's pregrasp):
+                            # the policy's grasp pose sits high, so lower straight
+                            # down onto the object. grasp-on-contact stops it at the
+                            # real grasp height.
+                            if cfg.pregrasp_enabled:
+                                try:
+                                    self.driver.move_by_base_offset(
+                                        (0.0, 0.0, cfg.pregrasp_z_offset),
+                                        cfg.pregrasp_time_s, min_z=cfg.pregrasp_z_min)
+                                except CollisionAborted:
+                                    log.info("[pregrasp] contact during lowering "
+                                             "-> closing at the contact height")
+                        resp = self.driver.grasp(cfg.grasp_width_m)
+                        if resp == receding.GRASP_SUCCESS:
+                            gripper_closed = True
+                            ever_held = True
+                            failed_grasps = 0
+                            # Record pickup XY for the hold-until-transported guard.
+                            try:
+                                pxy = self.driver.read_cartesian()[:2]
+                                grasp_xy = (float(pxy[0]), float(pxy[1]))
+                            except Exception:
+                                grasp_xy = None
+                        else:
+                            failed_grasps += 1
+                            log.warning("grasp_fail (receding) %d/%d: %s",
+                                        failed_grasps, grasp_retry_limit, resp)
+                            self.driver.open_gripper_verified()
+                            gripper_closed = False
+                            if failed_grasps >= grasp_retry_limit:
+                                stopped_by = "grasp_retry_budget_exhausted"
+                                steps_done += 1
+                                break
+                    elif cmd == "open" and gripper_closed:
+                        self.driver.open_gripper_verified()
+                        gripper_closed = False
+            except CollisionAborted as ca:
+                # The server already ran automaticErrorRecovery, so the arm is
+                # movable. Do NOT home -- homing mid-transport throws away all
+                # progress (and can fling a held object). Note it and re-perceive
+                # next iteration so the policy re-plans from where it is (Deo's
+                # note-and-continue). Bail only if reflexes keep firing.
+                collision_recoveries += 1
+                log.warning(
+                    "collision (receding) recovered server-side (%d/%d): %s",
+                    collision_recoveries, cfg.max_collision_recoveries,
+                    str(ca)[:200])
+                if collision_recoveries > cfg.max_collision_recoveries:
+                    self._set_progress(0, 0)
+                    return {"ok": False,
+                            "error": "max collision recoveries exceeded",
+                            "stopped_by": "collision",
+                            "collision_detail": str(ca)[:300],
+                            "chunks_done": steps_done}
+
+            steps_done += 1
+
+        self._set_progress(0, 0)
+        homed_after_stop = None
+        home_error: Optional[str] = None
+        if stopped_by == "stop_requested":
+            try:
+                with self._driver_lock:
+                    self.driver.home()
+                homed_after_stop = True
+            except Exception as he:
+                homed_after_stop = False
+                home_error = str(he)
+        return {
+            "ok": True,
+            "info": f"trial done via rest receding ({stopped_by})",
+            "execution_mode": "receding",
+            "stopped_by": stopped_by,
+            "chunks_done": steps_done,
+            "chunks_budget": cap,
+            "wallclock_ms": round((time.perf_counter() - t0) * 1000.0, 1),
+            "infer_server_ms_total": round(total_server_ms, 1),
+            "infer_rtt_ms_total": round(total_rtt_ms, 1),
+            "grasp_fail_count": failed_grasps,
+            "grasp_retry_limit": grasp_retry_limit,
+            "collision_recoveries": collision_recoveries,
+            "gripper_open_suppressed": total_suppressed,
+            "ever_held": ever_held,
+            "gripper_closed": gripper_closed,
             "homed_after_stop": homed_after_stop,
             "home_error": home_error,
         }
@@ -1120,10 +1368,16 @@ def make_app(state: DashboardState, fps: float = 30.0, webrtc=None) -> Flask:
                               grasp_retry_limit=grasp_retry_limit)
         try:
             try:
-                result = state.do_task(instruction, max_chunks=max_chunks,
-                                       task_id=task_id,
-                                       hold_min_dist_m=hold_min_dist_m,
-                                       grasp_retry_limit=grasp_retry_limit)
+                if state.execution_mode == "receding":
+                    result = state.do_task_receding(
+                        instruction, max_chunks=max_chunks, task_id=task_id,
+                        grasp_retry_limit=grasp_retry_limit,
+                        hold_min_dist_m=hold_min_dist_m)
+                else:
+                    result = state.do_task(instruction, max_chunks=max_chunks,
+                                           task_id=task_id,
+                                           hold_min_dist_m=hold_min_dist_m,
+                                           grasp_retry_limit=grasp_retry_limit)
                 result["instruction"] = instruction
                 if task_id:
                     result["task_id"] = task_id
@@ -1188,6 +1442,14 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--settings-file", default=None,
                     help=f"path to the persisted dashboard settings JSON. "
                          f"Defaults to {_DEFAULT_SETTINGS_PATH}.")
+    ap.add_argument("--execution-mode",
+                    choices=["chunk", "receding"],
+                    default=os.environ.get("FRANKA_BENCH_EXECUTION_MODE", "chunk"),
+                    help="trial execution strategy. 'chunk' (default): stream the "
+                         "subsampled cartesian chunk + cam-offset. 'receding': "
+                         "joint-space, transition-aware, one clipped waypoint per "
+                         "inference (re-perceive each step), firmware grasp + "
+                         "pre-grasp descent. Override via FRANKA_BENCH_EXECUTION_MODE.")
     args = ap.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO,
@@ -1230,8 +1492,10 @@ def main(argv: list[str] | None = None) -> int:
         max_chunks=args.max_chunks,
         motion_server=motion_server,
         settings=settings,
+        execution_mode=args.execution_mode,
     )
     state.apply_persisted_settings()
+    log.info("execution mode: %s", state.execution_mode)
 
     webrtc = None if args.no_webrtc else _build_webrtc_broadcaster()
     if webrtc is not None:
