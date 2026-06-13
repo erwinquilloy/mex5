@@ -222,6 +222,19 @@ class FrankaRestDriver:
         self._fast_step_time_s: Optional[float] = float(_fast) if _fast else None
         self._slow_zone_z_m: Optional[float] = float(_zone) if _zone else None
 
+        # Joint-space mode (OFF by default). When enabled, send_chunk streams the
+        # policy's absolute joint poses straight to motion_server's moveToJointPose
+        # endpoint instead of FK'ing each row to a cartesian pose. This skips the
+        # cartesian->IK round trip that lets libfranka re-resolve the redundant DOF
+        # into an overstretched posture near the workspace edge (cartesian_reflex).
+        # Trade-off: the cartesian cam-offset and lab-box XY clamp do NOT apply in
+        # this mode (there's no cartesian target to shift/clamp); motion_server's
+        # isValidJointPose joint-limit check is the guard instead. Requires a
+        # motion_server built with the moveToJointPose endpoint (lab-port).
+        self._joint_space = os.environ.get(
+            "FRANKA_BENCH_REST_JOINT_SPACE", "0"
+        ).strip().lower() in ("1", "true", "yes", "on")
+
         try:
             import panda_py  # noqa: F401
         except Exception as e:
@@ -470,6 +483,11 @@ class FrankaRestDriver:
             raise ValueError(f"expected (N, 8), got {actions.shape}")
         if len(actions) == 0:
             return
+        if self._joint_space:
+            return self._send_chunk_joints(
+                actions, step_dt_s=step_dt_s, grip_threshold=grip_threshold,
+                stop_check=stop_check,
+            )
         slow_t_sec = float(step_dt_s if step_dt_s is not None else self._step_time_s)
         last_idx = len(actions) - 1
         # Cam-offset gating depends on the configured mode. See __init__ for
@@ -520,6 +538,36 @@ class FrankaRestDriver:
                     lock_down=lock_gripper_down,
                     apply_cam_offset=cam_offset,
                 )
+
+    def _send_chunk_joints(
+        self,
+        actions: np.ndarray,
+        step_dt_s: Optional[float],
+        grip_threshold: float,
+        stop_check: Optional[Callable[[], bool]],
+    ) -> None:
+        """Joint-space variant of send_chunk: stream each row's absolute joint
+        pose straight to motion_server's moveToJointPose, no cartesian round
+        trip. No cam-offset / lab-box clamp here (those are cartesian); the
+        server's isValidJointPose joint-limit check is the guard. Per row: move
+        to the pose, then set the gripper to the row's commanded state -- so on
+        a grasp row the jaws reach the pose open, then close, instead of
+        shutting in mid-air."""
+        t_sec = float(step_dt_s if step_dt_s is not None else self._step_time_s)
+        for row in actions:
+            if stop_check is not None and stop_check():
+                return
+            q_target = row[:7]
+            close = bool(row[7] >= grip_threshold)
+            params = [float(q) for q in q_target] + [t_sec]
+            if close:
+                # Reach the pose first (gripper in whatever prior state), then
+                # close — mirrors the cartesian path's "don't shut mid-air".
+                self._post("moveToJointPose", params)
+                self._set_gripper(True)
+            else:
+                self._set_gripper(False)
+                self._post("moveToJointPose", params)
 
     # ----- lifecycle -----
 

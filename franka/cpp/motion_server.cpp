@@ -20,6 +20,10 @@ using namespace web;
 using namespace web::http;
 using namespace web::http::experimental::listener;
 
+namespace {
+constexpr double kDefaultMotionTime = 1.0;
+}
+
 class RobotHandler {
     franka::Robot robot;
     franka::Gripper gripper;
@@ -125,6 +129,112 @@ public:
             return false;
         }
         return true;
+    }
+
+    bool isValidJointPose(const std::array<double, 7>& q) {
+        // Franka Emika Panda joint limits (radians)
+        static const std::array<double, 7> q_min = {
+            -2.8973, -1.7628, -2.8973, -3.0718, -2.8973, -0.0175, -2.8973
+        };
+        static const std::array<double, 7> q_max = {
+            2.8973, 1.7628, 2.8973, -0.0698, 2.8973, 3.7525, 2.8973
+        };
+        for (int i = 0; i < 7; ++i) {
+            if (q[i] < q_min[i] || q[i] > q_max[i]) {
+                std::cerr << "Joint " << (i + 1) << " target " << q[i]
+                          << " rad outside ["
+                          << q_min[i] << ", " << q_max[i] << "]" << std::endl;
+                return false;
+            }
+        }
+        return true;
+    }
+
+    // moveToJointPose: cubic joint-position trajectory from current q to a
+    // user-supplied target q. Sends the policy's absolute joint pose directly
+    // via franka::JointPositions -- no FK->cartesian->IK round trip, so
+    // libfranka can't re-resolve the redundant DOF into an overstretched
+    // posture near the workspace edge (the cause of cartesian_reflex aborts on
+    // the cartesian path). Intended for VLAs that emit absolute joint poses
+    // (e.g. MolmoAct2-DROID's control_mode == "absolute joint pose"). Accepts
+    // at least 7 floats (joint targets, rad); optional 8th float is motion
+    // time tf (clamped to >= kDefaultMotionTime). Returns the final 7 joint
+    // angles read back post-motion. Lab-port.
+    std::vector<double> moveToJointPose(const std::vector<float> &numbers) {
+        std::lock_guard<std::mutex> lock(robot_mutex);
+        std::vector<double> final_q(7, 0.0);
+        if (numbers.size() < 7) {
+            throw std::runtime_error(
+                "moveToJointPose requires at least 7 joint angles (rad).");
+        }
+        std::array<double, 7> q_target_raw;
+        for (int i = 0; i < 7; ++i) {
+            q_target_raw[i] = static_cast<double>(numbers[i]);
+        }
+        if (!isValidJointPose(q_target_raw)) {
+            throw std::runtime_error(
+                "Joint target outside Franka joint limits.");
+        }
+        double tf = kDefaultMotionTime;
+        if (numbers.size() >= 8) {
+            tf = static_cast<double>(numbers[7]);
+            if (tf < kDefaultMotionTime) {
+                tf = kDefaultMotionTime;
+            }
+        }
+        std::array<double, 7> q_initial{};
+        double time = 0.0;
+        const std::array<double, 7> q_target = q_target_raw;
+
+        try {
+            robot.control(
+                [&time, &q_initial, q_target, tf]
+                (const franka::RobotState& state, franka::Duration period)
+                    -> franka::JointPositions {
+                    time += period.toSec();
+                    if (time == 0.0) {
+                        q_initial = state.q;
+                    }
+                    std::array<double, 7> q_cur = q_initial;
+                    double t2 = pow(time, 2);
+                    double t3 = pow(time, 3);
+                    double tf2 = pow(tf, 2);
+                    double tf3 = pow(tf, 3);
+                    for (int i = 0; i < 7; ++i) {
+                        double delta = q_target[i] - q_initial[i];
+                        double a2 = 3.0 * delta / tf2;
+                        double a3 = -2.0 * delta / tf3;
+                        q_cur[i] = q_initial[i] + a2 * t2 + a3 * t3;
+                    }
+                    franka::JointPositions output = q_cur;
+                    if (time >= tf) {
+                        std::cout << time
+                                  << "sec : End of joint motion ........."
+                                  << std::endl;
+                        return franka::MotionFinished(output);
+                    }
+                    return output;
+                }
+            );
+        } catch (const franka::Exception &ex) {
+            std::cerr << "franka::Exception during moveToJointPose: "
+                      << ex.what() << std::endl;
+            try {
+                robot.automaticErrorRecovery();
+            } catch (const franka::Exception &re) {
+                throw std::runtime_error(
+                    std::string("collision_recovery_failed: original=")
+                    + ex.what() + " recovery=" + re.what());
+            }
+            throw std::runtime_error(
+                std::string("collision_recovery: ") + ex.what());
+        }
+
+        franka::RobotState st = robot.readOnce();
+        for (int i = 0; i < 7; ++i) {
+            final_q[i] = st.q[i];
+        }
+        return final_q;
     }
 
     // moveToCartesian accepts three float numbers in a vector
@@ -477,6 +587,11 @@ private:
                         std::vector<double> final_coords = robotHandler.moveToCartesian(numbers);
                         for (int i = 0; i < 6; ++i) {
                             response[key][i] = json::value::number(final_coords[i]);
+                        }
+                    } else if (key == "moveToJointPose") {
+                        std::vector<double> final_q = robotHandler.moveToJointPose(numbers);
+                        for (int i = 0; i < 7; ++i) {
+                            response[key][i] = json::value::number(final_q[i]);
                         }
                     } else if (key == "closeGripper") {
                         std::string message = robotHandler.closeGripper(numbers);
