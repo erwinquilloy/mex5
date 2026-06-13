@@ -234,7 +234,7 @@ class DashboardState:
         grasp_commit_grip_frac: float,
         fine_refinement_travel_rad: float,
         approach_max_rows: int = 4,
-        max_chunks: int = 30,
+        max_chunks: int = 60,
         motion_server: Optional[MotionServerLauncher] = None,
         settings: Optional[DashboardSettings] = None,
         execution_mode: str = "chunk",
@@ -668,6 +668,16 @@ class DashboardState:
                                         failed_grasps, grasp_retry_limit, resp)
                             self.driver.open_gripper_verified()
                             gripper_closed = False
+                            # Lift clear so the next attempt re-approaches from a
+                            # clean vantage (re-perceives from above) instead of
+                            # jabbing back down at the same low pose.
+                            if cfg.grasp_fail_retreat_z_m > 0.0:
+                                try:
+                                    self.driver.move_by_base_offset(
+                                        (0.0, 0.0, cfg.grasp_fail_retreat_z_m),
+                                        cfg.grasp_xy_time_s)
+                                except CollisionAborted:
+                                    pass  # going up; unlikely to contact
                             if failed_grasps >= grasp_retry_limit:
                                 stopped_by = "grasp_retry_budget_exhausted"
                                 steps_done += 1

@@ -21,7 +21,7 @@ class DroidTask:
     setup_notes: str            # human-readable scene setup for the operator
     paper_success_rate: float   # MolmoAct2-DROID reference % from Table 6
     trials: int = 15
-    max_chunks: int = 30        # safety cap on action chunks per trial
+    max_chunks: int = 200        # safety cap on action chunks per trial
     # Base-frame XY box of the placement target (xmin, xmax, ymin, ymax in metres).
     # Used ONLY when run_droid_benchmark is invoked with --hold-until-target, in
     # which case the runner suppresses any policy-commanded gripper-open whose

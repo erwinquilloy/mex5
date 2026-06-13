@@ -70,6 +70,11 @@ class RecedingConfig:
     grasp_xy_offset_m: tuple = (0.0, 0.0)
     grasp_xy_time_s: float = 2.0         # tf for the lateral align (slow: it's a
                                          # several-cm move, not the small Z descent)
+    # After a failed grasp (jaws closed empty / object slipped), lift straight up
+    # by this much before re-attempting, so the next approach starts from a clean
+    # vantage and re-perceives from above instead of jabbing back down at the same
+    # low pose. 0 disables.
+    grasp_fail_retreat_z_m: float = 0.10
     max_collision_recoveries: int = 8
     home_q: tuple = field(default_factory=lambda: (
         0.0, -np.pi / 4, 0.0, -3 * np.pi / 4, 0.0, np.pi / 2, np.pi / 4))
@@ -105,6 +110,8 @@ class RecedingConfig:
             "FRANKA_BENCH_RH_PREGRASP_TIME_S", c.pregrasp_time_s)
         c.grasp_xy_time_s = _env_float(
             "FRANKA_BENCH_RH_GRASP_XY_TIME_S", c.grasp_xy_time_s)
+        c.grasp_fail_retreat_z_m = _env_float(
+            "FRANKA_BENCH_RH_GRASP_FAIL_RETREAT_Z_M", c.grasp_fail_retreat_z_m)
         xy = os.environ.get("FRANKA_BENCH_RH_GRASP_XY_OFFSET")
         if xy:
             parts = [float(p) for p in xy.split(",")]
