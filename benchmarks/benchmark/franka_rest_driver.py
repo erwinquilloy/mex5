@@ -72,6 +72,7 @@ Tunable via env vars (all optional):
 """
 from __future__ import annotations
 
+import logging
 import math
 import os
 import time
@@ -82,6 +83,8 @@ import numpy as np
 import requests
 
 from .driver_errors import CollisionAborted
+
+log = logging.getLogger("dashboard.driver")
 
 _HOME_Q = np.array([0., -np.pi/4, 0., -3*np.pi/4, 0., np.pi/2, np.pi/4], dtype=np.float64)
 _GRIPPER_MAX_M = 0.08
@@ -218,6 +221,19 @@ class FrankaRestDriver:
         )
         self._fast_step_time_s: Optional[float] = float(_fast) if _fast else None
         self._slow_zone_z_m: Optional[float] = float(_zone) if _zone else None
+
+        # Joint-space mode (OFF by default). When enabled, send_chunk streams the
+        # policy's absolute joint poses straight to motion_server's moveToJointPose
+        # endpoint instead of FK'ing each row to a cartesian pose. This skips the
+        # cartesian->IK round trip that lets libfranka re-resolve the redundant DOF
+        # into an overstretched posture near the workspace edge (cartesian_reflex).
+        # Trade-off: the cartesian cam-offset and lab-box XY clamp do NOT apply in
+        # this mode (there's no cartesian target to shift/clamp); motion_server's
+        # isValidJointPose joint-limit check is the guard instead. Requires a
+        # motion_server built with the moveToJointPose endpoint (lab-port).
+        self._joint_space = os.environ.get(
+            "FRANKA_BENCH_REST_JOINT_SPACE", "0"
+        ).strip().lower() in ("1", "true", "yes", "on")
 
         try:
             import panda_py  # noqa: F401
@@ -377,6 +393,8 @@ class FrankaRestDriver:
 
         x_c, y_c, z_c = float(T_cur[0, 3]), float(T_cur[1, 3]), float(T_cur[2, 3])
         x_t, y_t, z_t = float(T_tgt[0, 3]), float(T_tgt[1, 3]), float(T_tgt[2, 3])
+        # Raw policy target (pre-offset), kept for the cam-calibration log below.
+        raw_x_t, raw_y_t, raw_z_t = x_t, y_t, z_t
         if apply_cam_offset:
             x_t += self._cam_dx_m
             y_t += self._cam_dy_m
@@ -394,6 +412,18 @@ class FrankaRestDriver:
                 f"Z[>= {_LAB_Z_MIN:.3f}]"
             )
         x_t, y_t, z_t = x_clipped, y_clipped, z_clipped
+        if apply_cam_offset:
+            # Cam-offset calibration aid: with offsets zeroed, "policy" is where
+            # the model wanted to grasp. delta = policy - object_known_xyz, and
+            # the correcting offset to dial into the dashboard is -delta.
+            log.warning(
+                "cam-calib grasp-terminal target: "
+                "policy=(%+.4f, %+.4f, %+.4f) offset=(%+.4f, %+.4f, %+.4f) "
+                "commanded=(%+.4f, %+.4f, %+.4f) m",
+                raw_x_t, raw_y_t, raw_z_t,
+                self._cam_dx_m, self._cam_dy_m, self._cam_dz_m,
+                x_t, y_t, z_t,
+            )
         a_c, b_c, g_c = _zyx_euler_from_R(T_cur[:3, :3])
         a_t, b_t, g_t = _zyx_euler_from_R(T_tgt[:3, :3])
 
@@ -426,6 +456,61 @@ class FrankaRestDriver:
         self._post("openGripper", [_GRIPPER_MAX_M])
         self._last_grip = False
 
+    # ----- receding-horizon primitives -----
+    # Thin wrappers used by the dashboard's receding-horizon execution mode
+    # (do_task_receding). Kept separate from send_chunk so that path stays
+    # untouched. _post raises CollisionAborted on a "collision_recovery:" reply,
+    # which the loop catches for home-recovery.
+
+    def move_to_joint_pose(self, q7: Sequence[float], tf: float) -> list[float]:
+        """Move to an absolute 7-DOF joint pose via motion_server's
+        moveToJointPose (no FK->cartesian->IK round trip). Returns the final
+        joint angles read back by the server."""
+        params = [float(q) for q in q7]
+        if len(params) != 7:
+            raise ValueError(f"move_to_joint_pose expects 7 joints, got {len(params)}")
+        params.append(float(tf))
+        body = self._post("moveToJointPose", params)
+        return list(body.get("moveToJointPose", []))
+
+    def home_joints(self, tf: float = _DEFAULT_HOME_TIME_S) -> list[float]:
+        """Joint-space home (for collision recovery in the receding loop)."""
+        return self.move_to_joint_pose(_HOME_Q.tolist(), tf)
+
+    def grasp(self, width: float = 0.01) -> str:
+        """Close on an object and return motion_server's firmware response
+        string (``"Object grasped successfully."`` on a confirmed grasp, a
+        failure string otherwise). Unlike _set_gripper this does not cache or
+        short-circuit -- a grasp attempt always runs."""
+        body = self._post("closeGripper", [float(width)])
+        self._last_grip = True
+        return str(body.get("closeGripper", ""))
+
+    def open_gripper_verified(self) -> str:
+        """Open the jaws and return motion_server's response string."""
+        body = self._post("openGripper", [_GRIPPER_MAX_M])
+        self._last_grip = False
+        return str(body.get("openGripper", ""))
+
+    def read_cartesian(self) -> list[float]:
+        """Current TCP pose [x, y, z, alpha, beta, gamma] via readState."""
+        body = self._post("readState", [])
+        return list(body.get("readState", []))
+
+    def move_by_base_offset(self, offset_xyz: Sequence[float], tf: float,
+                            min_z: float = 0.02) -> None:
+        """Translate the TCP by a base-frame XYZ offset, orientation held.
+        Z is floored at ``min_z`` so a downward nudge can't push into the
+        table. Port of steven's _move_by_base_offset."""
+        pose = self.read_cartesian()
+        if len(pose) < 3 or not all(math.isfinite(v) for v in pose[:3]):
+            raise RuntimeError(f"readState returned an invalid pose: {pose!r}")
+        x = float(pose[0]) + float(offset_xyz[0])
+        y = float(pose[1]) + float(offset_xyz[1])
+        z = max(float(pose[2]) + float(offset_xyz[2]), float(min_z))
+        # moveToCartesian: [x, y, z, tf, dAlpha, dBeta, dGamma]; zero rotation.
+        self._post("moveToCartesian", [x, y, z, float(tf), 0.0, 0.0, 0.0])
+
     def send_chunk(
         self,
         actions: np.ndarray,
@@ -453,6 +538,11 @@ class FrankaRestDriver:
             raise ValueError(f"expected (N, 8), got {actions.shape}")
         if len(actions) == 0:
             return
+        if self._joint_space:
+            return self._send_chunk_joints(
+                actions, step_dt_s=step_dt_s, grip_threshold=grip_threshold,
+                stop_check=stop_check,
+            )
         slow_t_sec = float(step_dt_s if step_dt_s is not None else self._step_time_s)
         last_idx = len(actions) - 1
         # Cam-offset gating depends on the configured mode. See __init__ for
@@ -503,6 +593,36 @@ class FrankaRestDriver:
                     lock_down=lock_gripper_down,
                     apply_cam_offset=cam_offset,
                 )
+
+    def _send_chunk_joints(
+        self,
+        actions: np.ndarray,
+        step_dt_s: Optional[float],
+        grip_threshold: float,
+        stop_check: Optional[Callable[[], bool]],
+    ) -> None:
+        """Joint-space variant of send_chunk: stream each row's absolute joint
+        pose straight to motion_server's moveToJointPose, no cartesian round
+        trip. No cam-offset / lab-box clamp here (those are cartesian); the
+        server's isValidJointPose joint-limit check is the guard. Per row: move
+        to the pose, then set the gripper to the row's commanded state -- so on
+        a grasp row the jaws reach the pose open, then close, instead of
+        shutting in mid-air."""
+        t_sec = float(step_dt_s if step_dt_s is not None else self._step_time_s)
+        for row in actions:
+            if stop_check is not None and stop_check():
+                return
+            q_target = row[:7]
+            close = bool(row[7] >= grip_threshold)
+            params = [float(q) for q in q_target] + [t_sec]
+            if close:
+                # Reach the pose first (gripper in whatever prior state), then
+                # close — mirrors the cartesian path's "don't shut mid-air".
+                self._post("moveToJointPose", params)
+                self._set_gripper(True)
+            else:
+                self._set_gripper(False)
+                self._post("moveToJointPose", params)
 
     # ----- lifecycle -----
 

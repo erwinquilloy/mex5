@@ -21,7 +21,7 @@ class DroidTask:
     setup_notes: str            # human-readable scene setup for the operator
     paper_success_rate: float   # MolmoAct2-DROID reference % from Table 6
     trials: int = 15
-    max_chunks: int = 30        # safety cap on action chunks per trial
+    max_chunks: int = 200        # safety cap on action chunks per trial
     # Base-frame XY box of the placement target (xmin, xmax, ymin, ymax in metres).
     # Used ONLY when run_droid_benchmark is invoked with --hold-until-target, in
     # which case the runner suppresses any policy-commanded gripper-open whose
@@ -46,10 +46,10 @@ TASKS: list[DroidTask] = [
     ),
     DroidTask(
         task_id="pipette_in_tray",
-        instruction="Put the pipette in the tray.",
+        instruction="Put the marker in the tray.",
         setup_notes=(
-            "Pipette on the table, tray on the side. OOD pipette color/shape "
-            "preferred. Re-randomize cam pose."
+            "Marker on the table (stand-in for the pipette), tray on the side. "
+            "OOD marker color/shape preferred. Re-randomize cam pose."
         ),
         paper_success_rate=86.7,
     ),
